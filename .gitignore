@@ -1,0 +1,24 @@
+# PlatformIO
+.pio/
+.piolibdeps/
+libdeps/
+.cache/
+
+# VS Code
+.vscode/
+
+# Build artifacts
+*.elf
+*.bin
+*.hex
+*.map
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.log
