@@ -1,12 +1,17 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+
 // ============================================================
 // ESP32-S3
 // ============================================================
 
 #define I2C_SDA 8
 #define I2C_SCL 9
+
+// GPIO używany docelowo jako DATA dla WS2814
+// Na obecnym etapie testujemy nim wejście 1A układu AHCT125.
+#define DATA_GPIO 1
 
 
 // ============================================================
@@ -26,6 +31,7 @@
 
 #define EEPROM_TIMESTAMP_ADDR 0x0010
 
+
 // Stan LED:
 // 0x0014
 //
@@ -33,6 +39,7 @@
 // 0x01 = ON
 
 #define EEPROM_LED_STATE_ADDR 0x0014
+
 
 // Marker poprawności danych LED
 #define EEPROM_LED_VALID_ADDR 0x0015
@@ -46,6 +53,7 @@
 
 // Heartbeat co 60 sekund
 #define SAVE_INTERVAL 60UL
+
 
 // 5 minut
 //
@@ -992,6 +1000,42 @@ void setup()
 
 
     // ========================================================
+    // TEST AHCT125
+    // ========================================================
+    //
+    // GPIO1 jest podłączony do:
+    //
+    // ESP32 GPIO1 -> AHCT125 pin 2 (1A)
+    //
+    // AHCT125 pin 3 (1Y) jest obecnie jeszcze niepodłączony.
+    //
+    // Na tym etapie nie mamy jeszcze podłączonej taśmy LED
+    // ani rezystora 330 Ω.
+    //
+    // Będziemy przełączać GPIO1:
+    //
+    // HIGH -> AHCT125 pin 3 powinien mieć około 5 V
+    // LOW  -> AHCT125 pin 3 powinien mieć około 0 V
+    //
+    // ========================================================
+
+    pinMode(
+        DATA_GPIO,
+        OUTPUT
+    );
+
+    digitalWrite(
+        DATA_GPIO,
+        LOW
+    );
+
+
+    Serial.println(
+        "TEST AHCT125 - GPIO1"
+    );
+
+
+    // ========================================================
     // I2C
     // ========================================================
 
@@ -1032,6 +1076,7 @@ void setup()
     // ========================================================
 
     checkPowerLoss();
+
 
     // ========================================================
     // NORMALNA PRACA
@@ -1094,14 +1139,35 @@ void loop()
 
 
     // ========================================================
-    // PÓŹNIEJ TUTAJ DOJDZIE:
+    // TEST AHCT125
     //
-    // - sterowanie WS2814
-    // - efekty
-    // - ON/OFF
-    // - jasność
-    // - kolory
+    // GPIO1 -> pin 2 (1A)
+    // pin 3 (1Y) -> pomiar multimetrem
+    //
+    // HIGH = około 5 V na pinie 3
+    // LOW  = około 0 V na pinie 3
     // ========================================================
 
-    delay(100);
+    digitalWrite(
+        DATA_GPIO,
+        HIGH
+    );
+
+    Serial.println(
+        "GPIO1 = HIGH"
+    );
+
+    delay(10000);
+
+
+    digitalWrite(
+        DATA_GPIO,
+        LOW
+    );
+
+    Serial.println(
+        "GPIO1 = LOW"
+    );
+
+    delay(10000);
 }
