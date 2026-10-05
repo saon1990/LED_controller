@@ -994,39 +994,97 @@ bool connectWiFi()
 
     WiFi.mode(WIFI_STA);
 
-    WiFi.begin(
-        WIFI_SSID,
-        WIFI_PASSWORD
-    );
+    // --------------------------------------------------------
+    // STATYCZNE IP
+    // --------------------------------------------------------
 
-    uint32_t start = millis();
+    IPAddress local_IP(192, 168, 1, 75);
+    IPAddress gateway(192, 168, 1, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    IPAddress dns(192, 168, 1, 1);
 
-    while (
-        WiFi.status() != WL_CONNECTED &&
-        millis() - start < 20000
-    )
-    {
-        delay(500);
-        Serial.print(".");
-    }
-
-    Serial.println();
-
-    if (WiFi.status() != WL_CONNECTED)
+    if (!WiFi.config(
+            local_IP,
+            gateway,
+            subnet,
+            dns))
     {
         Serial.println(
-            "BLAD: Nie udalo sie polaczyc z WiFi."
+            "BLAD: Nie udalo sie ustawic statycznego IP."
         );
-
-        return false;
+    }
+    else
+    {
+        Serial.println(
+            "Statyczne IP: 192.168.1.75"
+        );
     }
 
-    Serial.println("WiFi OK");
+    // --------------------------------------------------------
+    // AUTOMATYCZNY RECONNECT + RETRY
+    // --------------------------------------------------------
 
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
+    WiFi.setAutoReconnect(true);
 
-    return true;
+    const uint8_t MAX_ATTEMPTS = 6;
+    const uint32_t ATTEMPT_TIMEOUT = 10000;
+
+    for (
+        uint8_t attempt = 1;
+        attempt <= MAX_ATTEMPTS;
+        attempt++
+    )
+    {
+        Serial.printf(
+            "Proba polaczenia WiFi %d/%d...\n",
+            attempt,
+            MAX_ATTEMPTS
+        );
+
+        WiFi.disconnect();
+        delay(1000);
+
+        WiFi.begin(
+            WIFI_SSID,
+            WIFI_PASSWORD
+        );
+
+        uint32_t start = millis();
+
+        while (
+            WiFi.status() != WL_CONNECTED &&
+            millis() - start < ATTEMPT_TIMEOUT
+        )
+        {
+            delay(500);
+            Serial.print(".");
+        }
+
+        Serial.println();
+
+        if (WiFi.status() == WL_CONNECTED)
+        {
+            Serial.println("WiFi OK");
+
+            Serial.print("IP: ");
+            Serial.println(WiFi.localIP());
+
+            return true;
+        }
+
+        Serial.println(
+            "Brak polaczenia. Ponawiam..."
+        );
+
+        WiFi.disconnect();
+        delay(1000);
+    }
+
+    Serial.println(
+        "BLAD: Nie udalo sie polaczyc z WiFi po wszystkich probach."
+    );
+
+    return false;
 }
 
 // ============================================================
