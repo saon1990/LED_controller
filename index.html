@@ -1,0 +1,260 @@
+
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111111">
+
+<title>LED Terrace</title>
+
+<style>
+:root {
+    color-scheme: dark;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    background: #111;
+    color: #fff;
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    width: min(92%, 440px);
+    margin: 0 auto;
+    padding: 42px 0 30px;
+}
+
+h1 {
+    margin: 0 0 8px;
+    text-align: center;
+    font-size: 30px;
+    letter-spacing: 1px;
+}
+
+.subtitle {
+    margin-bottom: 35px;
+    text-align: center;
+    color: #888;
+    font-size: 14px;
+}
+
+.card {
+    background: #1b1b1b;
+    border: 1px solid #2a2a2a;
+    border-radius: 18px;
+    padding: 24px;
+}
+
+.status-label {
+    text-align: center;
+    color: #999;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.status {
+    margin: 8px 0 28px;
+    text-align: center;
+    font-size: 30px;
+    font-weight: bold;
+}
+
+.status.on {
+    color: #35d07f;
+}
+
+.status.off {
+    color: #999;
+}
+
+.buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.button {
+    border: 0;
+    border-radius: 13px;
+    padding: 18px 10px;
+    color: white;
+    font-size: 19px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: transform .08s ease, opacity .15s ease;
+}
+
+.button:active {
+    transform: scale(.98);
+}
+
+.button:disabled {
+    opacity: .45;
+    cursor: wait;
+}
+
+.button.on {
+    background: #16834b;
+}
+
+.button.off {
+    background: #a52a2a;
+}
+
+.info {
+    margin-top: 18px;
+    min-height: 20px;
+    text-align: center;
+    color: #777;
+    font-size: 13px;
+}
+
+@media (max-width: 380px) {
+    .container {
+        padding-top: 25px;
+    }
+
+    .card {
+        padding: 18px;
+    }
+
+    .button {
+        font-size: 17px;
+    }
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+
+<h1>LED TERRACE</h1>
+<div class="subtitle">Panel sterowania</div>
+
+<div class="card">
+    <div class="status-label">Stan LED</div>
+    <div id="status" class="status off">WYŁĄCZONE</div>
+
+    <div class="buttons">
+        <button id="onButton" class="button on" onclick="setLed('/api/on')">
+            WŁĄCZ
+        </button>
+
+        <button id="offButton" class="button off" onclick="setLed('/api/off')">
+            WYŁĄCZ
+        </button>
+    </div>
+
+    <div id="info" class="info"></div>
+</div>
+
+</div>
+
+<script>
+const statusElement = document.getElementById('status');
+const infoElement = document.getElementById('info');
+const onButton = document.getElementById('onButton');
+const offButton = document.getElementById('offButton');
+
+function updateStatus(isOn) {
+    statusElement.textContent = isOn ? 'WŁĄCZONE' : 'WYŁĄCZONE';
+    statusElement.className = isOn ? 'status on' : 'status off';
+
+    onButton.disabled = isOn;
+    offButton.disabled = !isOn;
+}
+
+async function refreshStatus() {
+    try {
+        const response = await fetch('/api/status', {
+            cache: 'no-store'
+        });
+
+        if (!response.ok)
+            throw new Error('HTTP ' + response.status);
+
+        const data = await response.json();
+        updateStatus(data.on);
+    }
+    catch (error) {
+        infoElement.textContent = 'Brak odpowiedzi z kontrolera';
+    }
+}
+
+async function setLed(endpoint) {
+    onButton.disabled = true;
+    offButton.disabled = true;
+    infoElement.textContent = endpoint.endsWith('/on')
+        ? 'Włączanie...'
+        : 'Wyłączanie...';
+
+    try {
+        const response = await fetch(endpoint, {
+            method: 'GET',
+            cache: 'no-store'
+        });
+
+        if (!response.ok)
+            throw new Error('HTTP ' + response.status);
+
+        const data = await response.json();
+        updateStatus(data.on);
+        infoElement.textContent = '';
+    }
+    catch (error) {
+        infoElement.textContent = 'Nie udało się wykonać polecenia';
+        await refreshStatus();
+    }
+}
+
+updateStatus(false);
+refreshStatus();
+</script>
+
+
+<script>
+let ledOn = false;
+let busy = false;
+
+function render() {
+    const status = document.querySelector(".status strong");
+    const onBtn = document.getElementById("onBtn");
+    const offBtn = document.getElementById("offBtn");
+
+    status.textContent = ledOn ? "WŁĄCZONE" : "WYŁĄCZONE";
+    status.className = ledOn ? "on" : "off";
+
+    onBtn.disabled = busy || ledOn;
+    offBtn.disabled = busy || !ledOn;
+}
+
+function setState(state) {
+    if (busy || state === ledOn) return;
+
+    busy = true;
+    document.getElementById("message").textContent =
+        state ? "Włączanie..." : "Wyłączanie...";
+    render();
+
+    // Symulacja czasu działania efektu LED.
+    setTimeout(() => {
+        ledOn = state;
+        busy = false;
+        document.getElementById("message").textContent = "";
+        render();
+    }, 1200);
+}
+
+render();
+</script>
+</body>
+
+</html>
