@@ -1,575 +1,279 @@
 #include <Arduino.h>
-#include <Wire.h>
-#include <WebServer.h>
-#include <WiFi.h>
-#include "config.h"
-#include "LED/LedController.h"
-#include "RTC/RtcManager.h"
-#include "STORAGE/EepromManager.h"
-#include "WEB/WebServerManager.h"
+#include <SPI.h>
 
-// ============================================================
-// LED CONTROLLER
-// ============================================================
+// ESP32-S3 DevKitC-1 N8R8 -> CC2500
+constexpr int PIN_SCK  = 4;
+constexpr int PIN_MOSI = 5;
+constexpr int PIN_MISO = 6;
+constexpr int PIN_CSN  = 7;
+constexpr int PIN_GDO0 = 15;
 
-LedController led;
-RtcManager rtc;
-EepromManager storage;
+constexpr uint32_t SPI_CLOCK = 1000000;
+constexpr float XOSC_HZ = 26000000.0f;
 
-// ============================================================
-// GLOBALNE DEKLARACJE
-// ============================================================
+SPISettings spiSettings(SPI_CLOCK, MSBFIRST, SPI_MODE0);
+const float frequenciesMHz[] = {2410.000f, 2441.000f, 2472.500f};
+constexpr int FREQUENCY_COUNT = 3;
+int currentFrequency = 0;
 
-WebServerManager web;
+// CC2500 strobes
+constexpr uint8_t SRES  = 0x30;
+constexpr uint8_t SCAL  = 0x33;
+constexpr uint8_t SRX   = 0x34;
+constexpr uint8_t SIDLE = 0x36;
+constexpr uint8_t SFRX  = 0x3A;
 
-void setLedOn();
-void setLedOff();
-bool saveCurrentState();
+// CC2500 configuration registers
+constexpr uint8_t IOCFG0   = 0x02;
+constexpr uint8_t FIFOTHR  = 0x03;
+constexpr uint8_t PKTCTRL0 = 0x08;
+constexpr uint8_t FSCTRL1  = 0x0B;
+constexpr uint8_t FSCTRL0  = 0x0C;
+constexpr uint8_t FREQ2    = 0x0D;
+constexpr uint8_t FREQ1    = 0x0E;
+constexpr uint8_t FREQ0    = 0x0F;
+constexpr uint8_t MDMCFG4  = 0x10;
+constexpr uint8_t MDMCFG3  = 0x11;
+constexpr uint8_t MDMCFG2  = 0x12;
+constexpr uint8_t MDMCFG1  = 0x13;
+constexpr uint8_t MDMCFG0  = 0x14;
+constexpr uint8_t MCSM0    = 0x18;
+constexpr uint8_t AGCCTRL2 = 0x1B;
+constexpr uint8_t AGCCTRL1 = 0x1C;
+constexpr uint8_t AGCCTRL0 = 0x1D;
 
-// ============================================================
-// LED ACTION WRAPPERS
-// ============================================================
+// CC2500 status registers
+constexpr uint8_t PARTNUM   = 0x30;
+constexpr uint8_t VERSION   = 0x31;
+constexpr uint8_t RSSI_REG  = 0x34;
+constexpr uint8_t MARCSTATE = 0x35;
 
-void setLedOn()
-{
-    if (led.isOn())
-    {
-        Serial.println("[LED] ON - stan juz jest ON");
-        return;
-    }
-
-    Serial.println("[LED] ON - start efektu");
-
-    led.turnOn();
-
-    if (!saveCurrentState())
-        Serial.println("[LED] UWAGA: nie zapisano stanu.");
-
-    Serial.println("[LED] ON - efekt zakonczony");
+uint8_t readConfig(uint8_t address) {
+  SPI.beginTransaction(spiSettings);
+  digitalWrite(PIN_CSN, LOW);
+  delayMicroseconds(2);
+  SPI.transfer(address | 0x80);
+  uint8_t value = SPI.transfer(0x00);
+  digitalWrite(PIN_CSN, HIGH);
+  SPI.endTransaction();
+  return value;
 }
 
-void setLedOff()
-{
-    if (!led.isOn())
-    {
-        Serial.println("[LED] OFF - stan juz jest OFF");
-        led.clear();
-        return;
-    }
-
-    Serial.println("[LED] OFF - start efektu");
-
-    led.turnOff();
-
-    if (!saveCurrentState())
-        Serial.println("[LED] UWAGA: nie zapisano stanu.");
-
-    Serial.println("[LED] OFF - efekt zakonczony");
+uint8_t readStatus(uint8_t address) {
+  SPI.beginTransaction(spiSettings);
+  digitalWrite(PIN_CSN, LOW);
+  delayMicroseconds(2);
+  SPI.transfer(address | 0xC0);
+  uint8_t value = SPI.transfer(0x00);
+  digitalWrite(PIN_CSN, HIGH);
+  SPI.endTransaction();
+  return value;
 }
 
-// ============================================================
-// STORAGE / RTC
-// ============================================================
-
-
-
-// ============================================================
-
-unsigned long lastSaveMillis = 0;
-
-// ============================================================
-// BCD
-// ============================================================
-
-uint8_t bcdToDec(uint8_t value)
-{
-    return ((value >> 4) * 10) + (value & 0x0F);
+void writeRegister(uint8_t address, uint8_t value) {
+  SPI.beginTransaction(spiSettings);
+  digitalWrite(PIN_CSN, LOW);
+  delayMicroseconds(2);
+  SPI.transfer(address);
+  SPI.transfer(value);
+  digitalWrite(PIN_CSN, HIGH);
+  SPI.endTransaction();
 }
 
-// ============================================================
-// RTC READ
-// ============================================================
-
-bool rtcRead(
-    uint16_t& year,
-    uint8_t& month,
-    uint8_t& day,
-    uint8_t& hour,
-    uint8_t& minute,
-    uint8_t& second
-)
-{
-    Wire.beginTransmission(RTC_ADDR);
-    Wire.write(0x00);
-
-    if (Wire.endTransmission(false) != 0)
-        return false;
-
-    if (Wire.requestFrom(
-            (uint8_t)RTC_ADDR,
-            (uint8_t)7) != 7)
-    {
-        return false;
-    }
-
-    uint8_t sec = Wire.read();
-    uint8_t min = Wire.read();
-    uint8_t hrs = Wire.read();
-
-    Wire.read();
-
-    uint8_t date = Wire.read();
-    uint8_t mon  = Wire.read();
-    uint8_t yr   = Wire.read();
-
-    second = bcdToDec(sec & 0x7F);
-    minute = bcdToDec(min & 0x7F);
-    hour   = bcdToDec(hrs & 0x3F);
-
-    day   = bcdToDec(date & 0x3F);
-    month = bcdToDec(mon & 0x1F);
-    year  = 2000 + bcdToDec(yr);
-
-    return true;
+uint8_t strobe(uint8_t command) {
+  SPI.beginTransaction(spiSettings);
+  digitalWrite(PIN_CSN, LOW);
+  delayMicroseconds(2);
+  uint8_t status = SPI.transfer(command);
+  digitalWrite(PIN_CSN, HIGH);
+  SPI.endTransaction();
+  return status;
 }
 
-// ============================================================
-// DAYS IN MONTH
-// ============================================================
-
-uint8_t daysInMonth(uint16_t year, uint8_t month)
-{
-    const uint8_t days[] =
-    {
-        31, 28, 31, 30, 31, 30,
-        31, 31, 30, 31, 30, 31
-    };
-
-    if (month == 2)
-    {
-        bool leap =
-            ((year % 4 == 0) &&
-             ((year % 100 != 0) ||
-              (year % 400 == 0)));
-
-        return leap ? 29 : 28;
-    }
-
-    return days[month - 1];
+void resetCC2500() {
+  strobe(SRES);
+  delay(5);
 }
 
-// ============================================================
-// DATETIME -> TIMESTAMP
-// ============================================================
+void configureReceiver() {
+  // GDO0 outputs Carrier Sense. This test measures RSSI and MARCSTATE.
+  writeRegister(IOCFG0, 0x0E);
+  writeRegister(FIFOTHR, 0x07);
 
-uint32_t dateTimeToTimestamp(
-    uint16_t year,
-    uint8_t month,
-    uint8_t day,
-    uint8_t hour,
-    uint8_t minute,
-    uint8_t second
-)
-{
-    uint32_t days = 0;
+  // Asynchronous serial mode avoids filling the RX FIFO with arbitrary
+  // demodulated noise while we only measure RSSI.
+  writeRegister(PKTCTRL0, 0x32);
 
-    for (uint16_t y = 2000; y < year; y++)
-    {
-        bool leap =
-            ((y % 4 == 0) &&
-             ((y % 100 != 0) ||
-              (y % 400 == 0)));
+  writeRegister(FSCTRL1, 0x0C);
+  writeRegister(FSCTRL0, 0x00);
 
-        days += leap ? 366 : 365;
-    }
+  // Wide diagnostic receive bandwidth; not a confirmed pilot configuration.
+  writeRegister(MDMCFG4, 0x03);
+  writeRegister(MDMCFG3, 0x93);
+  writeRegister(MDMCFG2, 0x00);
+  writeRegister(MDMCFG1, 0x22);
+  writeRegister(MDMCFG0, 0xF8);
 
-    for (uint8_t m = 1; m < month; m++)
-        days += daysInMonth(year, m);
-
-    days += day - 1;
-
-    return
-        days * 86400UL +
-        (uint32_t)hour * 3600UL +
-        (uint32_t)minute * 60UL +
-        second;
+  writeRegister(MCSM0, 0x18);
+  writeRegister(AGCCTRL2, 0xC7);
+  writeRegister(AGCCTRL1, 0x18);
+  writeRegister(AGCCTRL0, 0xB0);
 }
 
-// ============================================================
-// SAVE CURRENT STATE
-// ============================================================
+void setFrequency(float freqMHz) {
+  uint32_t word = (uint32_t)((freqMHz * 1000000.0f * 65536.0f) / XOSC_HZ);
 
-bool saveCurrentState()
-{
-    RtcDateTime now;
+  strobe(SIDLE);
+  writeRegister(FREQ2, (word >> 16) & 0xFF);
+  writeRegister(FREQ1, (word >> 8) & 0xFF);
+  writeRegister(FREQ0, word & 0xFF);
 
-    if (!rtc.getDateTime(now))
-    {
-        Serial.println("[STORAGE] BLAD ODCZYTU RTC");
-        return false;
-    }
-
-    uint32_t timestamp = rtc.toTimestamp(now);
-
-    if (!storage.saveTimestamp(timestamp))
-    {
-        Serial.println(
-            "[STORAGE] BLAD ZAPISU TIMESTAMPU"
-        );
-
-        return false;
-    }
-
-    if (!storage.saveLedState(led.isOn()))
-    {
-        Serial.println(
-            "[STORAGE] BLAD ZAPISU STANU LED"
-        );
-
-        return false;
-    }
-
-    Serial.printf(
-        "[STORAGE] Heartbeat: "
-        "%04u-%02u-%02u %02u:%02u:%02u "
-        "| timestamp=%lu | LED=%s\n",
-        now.year,
-        now.month,
-        now.day,
-        now.hour,
-        now.minute,
-        now.second,
-        timestamp,
-        led.isOn() ? "ON" : "OFF"
-    );
-
-    return true;
+  strobe(SCAL);
+  delay(3);
+  strobe(SRX);
+  delay(10);
 }
 
-// ============================================================
-// POWER LOSS CHECK
-// ============================================================
-
-void checkPowerLoss()
-{
-    uint32_t savedTimestamp;
-
-    if (!storage.loadTimestamp(savedTimestamp))
-    {
-        Serial.println(
-            "EEPROM: nie mozna odczytac timestampu."
-        );
-
-        Serial.println(
-            "Pierwsze/normalne uruchomienie."
-        );
-
-        led.restoreState(false);
-        return;
-    }
-
-    if (savedTimestamp == 0 ||
-        savedTimestamp == 0xFFFFFFFF)
-    {
-        Serial.println(
-            "EEPROM: brak zapisanego timestampu."
-        );
-
-        Serial.println(
-            "Pierwsze uruchomienie."
-        );
-
-        led.restoreState(false);
-        return;
-    }
-
-    bool savedLedState;
-
-    bool ledStateValid =
-        storage.loadLedState(savedLedState);
-
-    uint16_t year;
-    uint8_t month;
-    uint8_t day;
-    uint8_t hour;
-    uint8_t minute;
-    uint8_t second;
-
-    if (!rtcRead(
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second))
-    {
-        Serial.println(
-            "BLAD: Nie mozna odczytac DS3231!"
-        );
-
-        led.restoreState(false);
-        return;
-    }
-
-    uint32_t currentTimestamp =
-        dateTimeToTimestamp(
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second
-        );
-
-    Serial.println();
-    Serial.println(
-        "========================================"
-    );
-
-    Serial.println(
-        "         POWER LOSS CHECK"
-    );
-
-    Serial.println(
-        "========================================"
-    );
-
-    Serial.printf(
-        "Aktualny RTC:       "
-        "%04d-%02d-%02d %02d:%02d:%02d\n",
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second
-    );
-
-    Serial.printf(
-        "Aktualny timestamp:  %lu\n",
-        currentTimestamp
-    );
-
-    Serial.printf(
-        "Zapisany timestamp:   %lu\n",
-        savedTimestamp
-    );
-
-    if (ledStateValid)
-    {
-        Serial.printf(
-            "Zapisany stan LED:   %s\n",
-            savedLedState ? "ON" : "OFF"
-        );
-    }
-    else
-    {
-        Serial.println(
-            "Zapisany stan LED:   BRAK"
-        );
-    }
-
-    if (currentTimestamp < savedTimestamp)
-    {
-        Serial.println(
-            "BLAD: timestamp EEPROM "
-            "jest z przyszlosci."
-        );
-
-        led.restoreState(false);
-        return;
-    }
-
-    uint32_t difference =
-        currentTimestamp -
-        savedTimestamp;
-
-    Serial.println(
-        "----------------------------------------"
-    );
-
-    Serial.printf(
-        "Czas od ostatniego heartbeat: "
-        "%lu sekund\n",
-        difference
-    );
-
-    Serial.println(
-        "----------------------------------------"
-    );
-
-    if (difference >= LONG_OUTAGE)
-    {
-        led.turnOff();
-
-        Serial.println(
-            "WYNIK: DLUGI ZANIK ZASILANIA"
-        );
-
-        Serial.println(
-            "LED -> OFF"
-        );
-    }
-    else
-    {
-        Serial.println(
-            "WYNIK: KROTKI ZANIK ZASILANIA"
-        );
-
-        if (!ledStateValid)
-        {
-            led.restoreState(false);
-
-            Serial.println(
-                "Brak zapisanego stanu LED."
-            );
-
-            Serial.println(
-                "LED -> OFF"
-            );
-        }
-        else
-        {
-            if (savedLedState) led.turnOn(); else led.turnOff();
-
-            Serial.printf(
-                "Poprzedni stan LED: %s\n",
-                savedLedState ? "ON" : "OFF"
-            );
-
-            Serial.printf(
-                "LED -> %s\n",
-                led.isOn() ? "ON" : "OFF"
-            );
-        }
-    }
-
-    Serial.println();
+float rssiToDbm(uint8_t raw) {
+  return ((float)(int8_t)raw / 2.0f) - 74.0f;
 }
 
-// ============================================================
-// WEB
-// ============================================================
+void printMenu() {
+  Serial.println();
+  Serial.println("=========== MENU ===========");
+  Serial.println("1 - ustaw 2410.000 MHz");
+  Serial.println("2 - ustaw 2441.000 MHz");
+  Serial.println("3 - ustaw 2472.500 MHz");
+  Serial.println("i - pomiar IDLE (bez pilota)");
+  Serial.println("o - pomiar ON (naciskaj ON podczas pomiaru)");
+  Serial.println("f - pomiar OFF (naciskaj OFF podczas pomiaru)");
+  Serial.println("h - wyswietl menu");
+  Serial.println("============================");
+}
 
-// ============================================================
-// SETUP
-// ============================================================
+void measure(char phase) {
+  const char* phaseName = (phase == 'i') ? "IDLE" : (phase == 'o') ? "ON" : "OFF";
+  Serial.println();
+  Serial.printf("FAZA=%s | FREQ=%.3f MHz\n", phaseName, frequenciesMHz[currentFrequency]);
+  Serial.println("Pomiar rozpocznie sie za 3 sekundy.");
 
-void setup()
-{
-    Serial.begin(115200);
-
+  for (int i = 3; i >= 1; --i) {
+    Serial.printf("%d...\n", i);
     delay(1000);
+  }
 
-    led.begin();
+  strobe(SRX);
+  delay(20);
 
-    Wire.begin(
-        I2C_SDA,
-        I2C_SCL
-    );
+  int minRaw = 255;
+  int maxRaw = 0;
+  uint32_t sumRaw = 0;
+  uint32_t samples = 0;
+  uint32_t gdoHigh = 0;
+  uint32_t rxCount = 0;
+  uint32_t overflowCount = 0;
+  uint32_t otherStateCount = 0;
 
-    Serial.println();
+  uint32_t start = millis();
+  uint32_t nextPrint = start + 100;
+  Serial.println("czas_ms RSSI_raw RSSI_dBm MARCSTATE GDO0");
 
-    Serial.println(
-        "========================================"
-    );
+  while (millis() - start < 5000) {
+    uint8_t raw = readStatus(RSSI_REG);
+    uint8_t state = readStatus(MARCSTATE) & 0x1F;
+    int gdo = digitalRead(PIN_GDO0);
 
-    Serial.println(
-        "       LED CONTROLLER - START"
-    );
+    if (raw < minRaw) minRaw = raw;
+    if (raw > maxRaw) maxRaw = raw;
+    sumRaw += raw;
+    samples++;
 
-    Serial.println(
-        "========================================"
-    );
+    if (gdo == HIGH) gdoHigh++;
+    if (state == 0x0D) rxCount++;
+    else if (state == 0x11) overflowCount++;
+    else otherStateCount++;
 
-    // --------------------------------------------------------
-    // POWER LOSS CHECK
-    // --------------------------------------------------------
-
-    checkPowerLoss();
-
-    Serial.println();
-
-    Serial.printf(
-        "Stan po sprawdzeniu zaniku: %s\n",
-        led.isOn() ? "ON" : "OFF"
-    );
-
-    // --------------------------------------------------------
-    // Przywrócenie stanu po krótkim zaniku
-    // --------------------------------------------------------
-
-    if (led.isOn())
-    {
-        Serial.println(
-            "Przywracam LED -> ON"
-        );
-
-        led.turnOn();
+    uint32_t elapsed = millis() - start;
+    if ((int32_t)(millis() - nextPrint) >= 0) {
+      Serial.printf("%lu %u %.1f 0x%02X %d\n",
+                    (unsigned long)elapsed, raw, rssiToDbm(raw), state, gdo);
+      nextPrint += 100;
     }
-    else
-    {
-        led.clear();
+    delay(10);
+  }
 
-        Serial.println(
-            "LED -> OFF"
-        );
-    }
+  Serial.println("--- PODSUMOWANIE ---");
+  Serial.printf("Liczba probek: %lu\n", (unsigned long)samples);
+  if (samples > 0) {
+    Serial.printf("RSSI raw min/max/srednia: %d / %d / %.2f\n",
+                  minRaw, maxRaw, (float)sumRaw / samples);
+    Serial.printf("RSSI dBm min/max: %.1f / %.1f\n",
+                  rssiToDbm((uint8_t)minRaw), rssiToDbm((uint8_t)maxRaw));
+    Serial.printf("GDO0 HIGH: %lu/%lu\n",
+                  (unsigned long)gdoHigh, (unsigned long)samples);
+    Serial.printf("MARCSTATE RX(0x0D): %lu\n", (unsigned long)rxCount);
+    Serial.printf("MARCSTATE RXFIFO_OVERFLOW(0x11): %lu\n",
+                  (unsigned long)overflowCount);
+    Serial.printf("MARCSTATE inne: %lu\n", (unsigned long)otherStateCount);
+  }
 
-    // --------------------------------------------------------
-    // WEB SERVER
-    // --------------------------------------------------------
-
-    web.begin(
-        led,
-        setLedOn,
-        setLedOff
-    );
-
-    // --------------------------------------------------------
-    // NETWORK
-    // --------------------------------------------------------
-    // RainMaker zostal celowo usuniety.
-    // WebServer pozostaje w projekcie, ale uruchomimy go
-    // ponownie po wydzieleniu modulu WEB.
-    // --------------------------------------------------------
-    // HEARTBEAT
-    // --------------------------------------------------------
-
-    lastSaveMillis = millis();
-
-    Serial.println();
-
-    Serial.println(
-        "Normalna praca uruchomiona."
-    );
-
-    Serial.println(
-        "Heartbeat STORAGE: co 60 sekund."
-    );
+  if (overflowCount > 0) {
+    Serial.println("UWAGA: nadal wykryto RXFIFO_OVERFLOW.");
+  } else if (rxCount == samples) {
+    Serial.println("OK: odbiornik pozostal w RX przez caly pomiar.");
+  } else {
+    Serial.println("UWAGA: odbiornik opuszczal stan RX; sprawdz stany MARCSTATE.");
+  }
+  Serial.println("Pomiar zakonczony.");
 }
 
-// ============================================================
-// LOOP
-// ============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
 
-void loop()
-{
-    web.handleClient();
+  pinMode(PIN_CSN, OUTPUT);
+  digitalWrite(PIN_CSN, HIGH);
+  pinMode(PIN_GDO0, INPUT);
 
-    // --------------------------------------------------------
-    // HEARTBEAT
-    // --------------------------------------------------------
+  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
 
-    if (
-        millis() - lastSaveMillis >=
-        SAVE_INTERVAL * 1000UL
-    )
-    {
-        lastSaveMillis = millis();
+  Serial.println();
+  Serial.println("ESP32-S3 + CC2500 - RSSI / MARCSTATE TEST");
 
-        saveCurrentState();
-    }
+  resetCC2500();
+  Serial.printf("PARTNUM=0x%02X\n", readStatus(PARTNUM));
+  Serial.printf("VERSION=0x%02X\n", readStatus(VERSION));
 
-    delay(2);
+  configureReceiver();
+  setFrequency(frequenciesMHz[currentFrequency]);
+
+  Serial.printf("Startowa czestotliwosc: %.3f MHz\n", frequenciesMHz[currentFrequency]);
+  Serial.printf("MARCSTATE po konfiguracji: 0x%02X\n", readStatus(MARCSTATE) & 0x1F);
+  printMenu();
+}
+
+void loop() {
+  if (!Serial.available()) {
+    delay(10);
+    return;
+  }
+
+  char cmd = Serial.read();
+  if (cmd == '\r' || cmd == '\n' || cmd == ' ') return;
+
+  if (cmd >= '1' && cmd <= '3') {
+    currentFrequency = cmd - '1';
+    setFrequency(frequenciesMHz[currentFrequency]);
+    Serial.printf("Ustawiono %.3f MHz\n", frequenciesMHz[currentFrequency]);
+    Serial.printf("MARCSTATE=0x%02X\n", readStatus(MARCSTATE) & 0x1F);
+  } else if (cmd == 'i' || cmd == 'I' || cmd == 'o' || cmd == 'O' ||
+             cmd == 'f' || cmd == 'F') {
+    char phase = cmd;
+    if (phase >= 'A' && phase <= 'Z') phase += ('a' - 'A');
+    measure(phase);
+  } else if (cmd == 'h' || cmd == 'H') {
+    printMenu();
+  } else {
+    Serial.println("Nieznana komenda. Wpisz h, aby wyswietlic menu.");
+  }
 }
