@@ -2,26 +2,31 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-#include "driver/rmt_rx.h"
+#include "driver/rmt.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
+#include "freertos/ringbuf.h"
 
 // ESP32-S3 DevKitC-1 + CC2500
 static constexpr int PIN_SCK  = 4;
 static constexpr int PIN_MOSI = 5;
 static constexpr int PIN_MISO = 6;
 static constexpr int PIN_CSN  = 7;
-static constexpr int PIN_GDO0 = 15;
+static constexpr gpio_num_t PIN_GDO0 = GPIO_NUM_15;
 
 static constexpr float RF_FREQ_MHZ = 2472.750f;
-static constexpr uint32_t CAPTURE_MS = 1000;
+static constexpr uint32_t CAPTURE_MS = 2000;
 
-// CC2500 commands
-static constexpr uint8_t CC_SRES = 0x30;
-static constexpr uint8_t CC_SRX  = 0x34;
+static constexpr rmt_channel_t RMT_CHANNEL = RMT_CHANNEL_0;
+static constexpr uint8_t RMT_CLK_DIV = 80; // 80 MHz / 80 = 1 MHz
+static constexpr uint16_t RMT_IDLE_TICKS = 10000; // 10 ms
+
+static constexpr size_t MAX_PULSES = 12000;
+static constexpr size_t MAX_SEGMENTS = 500;
+
+static constexpr uint8_t CC_SRES  = 0x30;
+static constexpr uint8_t CC_SRX   = 0x34;
 static constexpr uint8_t CC_SIDLE = 0x36;
 
-// CC2500 registers
 static constexpr uint8_t REG_IOCFG0   = 0x02;
 static constexpr uint8_t REG_PKTCTRL0 = 0x08;
 static constexpr uint8_t REG_FSCTRL1  = 0x0B;
@@ -42,45 +47,27 @@ static constexpr uint8_t REG_AGCCTRL0 = 0x1D;
 static constexpr uint8_t REG_PARTNUM = 0x30;
 static constexpr uint8_t REG_VERSION = 0x31;
 
-static SPISettings ccSpiSettings(1000000, MSBFIRST, SPI_MODE0);
-
-static rmt_channel_handle_t rxChannel = nullptr;
-static QueueHandle_t rxQueue = nullptr;
-
-static constexpr size_t RMT_BUFFER_SYMBOLS = 128;
-static constexpr size_t MAX_CAPTURE_SYMBOLS = 5000;
-
-static rmt_symbol_word_t rmtBuffer[RMT_BUFFER_SYMBOLS];
-static rmt_symbol_word_t captured[MAX_CAPTURE_SYMBOLS];
-static size_t capturedCount = 0;
-static bool captureOverflow = false;
-
-struct RxEvent {
-    size_t numSymbols;
-    const rmt_symbol_word_t *symbols;
+struct Pulse {
+    uint16_t us;
+    uint8_t level;
 };
 
-static bool IRAM_ATTR onRmtReceive(
-    rmt_channel_handle_t channel,
-    const rmt_rx_done_event_data_t *edata,
-    void *userData)
-{
-    BaseType_t highPriorityTaskWoken = pdFALSE;
+static SPISettings spiSettings(1000000, MSBFIRST, SPI_MODE0);
+static RingbufHandle_t rxRingbuffer = nullptr;
 
-    RxEvent event;
-    event.numSymbols = edata->num_symbols;
-    event.symbols = edata->received_symbols;
+static Pulse pulses[MAX_PULSES];
+static size_t pulseCount = 0;
 
-    if (rxQueue != nullptr) {
-        xQueueSendFromISR(rxQueue, &event, &highPriorityTaskWoken);
-    }
+static size_t segmentStarts[MAX_SEGMENTS];
+static size_t segmentEnds[MAX_SEGMENTS];
+static size_t segmentCount = 0;
 
-    return highPriorityTaskWoken == pdTRUE;
-}
+static bool pulseOverflow = false;
+static bool segmentOverflow = false;
 
 static void ccSelect()
 {
-    SPI.beginTransaction(ccSpiSettings);
+    SPI.beginTransaction(spiSettings);
     digitalWrite(PIN_CSN, LOW);
 }
 
@@ -116,9 +103,9 @@ static uint8_t ccReadStatus(uint8_t reg)
 
 static void ccSetFrequency(float mhz)
 {
-    // CC2500 frequency word for a 26 MHz crystal.
-    const uint32_t word =
-        (uint32_t)((mhz * 1000000.0f * 65536.0f) / 26000000.0f);
+    uint32_t word = (uint32_t)(
+        (mhz * 1000000.0f * 65536.0f) / 26000000.0f
+    );
 
     ccWriteReg(REG_FREQ2, (word >> 16) & 0xFF);
     ccWriteReg(REG_FREQ1, (word >> 8) & 0xFF);
@@ -136,7 +123,7 @@ static void setupCC2500()
     ccStrobe(CC_SRES);
     delay(5);
 
-    // Same RF settings as the previous raw-timing experiment.
+    // Dotychczasowa konfiguracja odbiornika CC2500.
     ccWriteReg(REG_IOCFG0,   0x0D);
     ccWriteReg(REG_PKTCTRL0, 0x30);
     ccWriteReg(REG_FSCTRL1,  0x0C);
@@ -162,177 +149,246 @@ static void setupCC2500()
 
     Serial.printf("PARTNUM: 0x%02X\n", ccReadStatus(REG_PARTNUM));
     Serial.printf("VERSION: 0x%02X\n", ccReadStatus(REG_VERSION));
-    Serial.printf("PKTCTRL0: 0x%02X\n", ccReadStatus(REG_PKTCTRL0));
-    Serial.printf("IOCFG0: 0x%02X\n", ccReadStatus(REG_IOCFG0));
-    Serial.printf("MDMCFG4: 0x%02X\n", ccReadStatus(REG_MDMCFG4));
-    Serial.printf("MDMCFG3: 0x%02X\n", ccReadStatus(REG_MDMCFG3));
     Serial.printf("RF frequency: %.3f MHz\n", RF_FREQ_MHZ);
 }
 
 static bool setupRMT()
 {
-    rxQueue = xQueueCreate(1, sizeof(RxEvent));
-    if (rxQueue == nullptr) {
-        Serial.println("ERROR: Could not create RMT queue");
+    rmt_config_t config = {};
+    config.rmt_mode = RMT_MODE_RX;
+    config.channel = RMT_CHANNEL;
+    config.gpio_num = PIN_GDO0;
+    config.clk_div = RMT_CLK_DIV;
+    config.mem_block_num = 1;
+
+    config.rx_config.filter_en = true;
+    config.rx_config.filter_ticks_thresh = 1;
+    config.rx_config.idle_threshold = RMT_IDLE_TICKS;
+
+    esp_err_t err = rmt_config(&config);
+    if (err != ESP_OK) {
+        Serial.printf("rmt_config failed: %s\n", esp_err_to_name(err));
         return false;
     }
 
-    rmt_rx_channel_config_t channelConfig = {};
-    channelConfig.gpio_num = (gpio_num_t)PIN_GDO0;
-    channelConfig.clk_src = RMT_CLK_SRC_DEFAULT;
-    channelConfig.resolution_hz = 1000000; // 1 tick = 1 us
-    channelConfig.mem_block_symbols = RMT_BUFFER_SYMBOLS;
-    channelConfig.flags.invert_in = false;
-    channelConfig.flags.with_dma = false;
-
-    esp_err_t err = rmt_new_rx_channel(&channelConfig, &rxChannel);
+    // Bufor FreeRTOS na odebrane fragmenty RMT.
+    err = rmt_driver_install(RMT_CHANNEL, 8192, 0);
     if (err != ESP_OK) {
-        Serial.printf("ERROR rmt_new_rx_channel: %s\n",
+        Serial.printf("rmt_driver_install failed: %s\n",
                       esp_err_to_name(err));
         return false;
     }
 
-    rmt_rx_event_callbacks_t callbacks = {};
-    callbacks.on_recv_done = onRmtReceive;
-
-    err = rmt_rx_register_event_callbacks(rxChannel, &callbacks, nullptr);
-    if (err != ESP_OK) {
-        Serial.printf("ERROR registering RMT callback: %s\n",
+    err = rmt_get_ringbuf_handle(RMT_CHANNEL, &rxRingbuffer);
+    if (err != ESP_OK || rxRingbuffer == nullptr) {
+        Serial.printf("rmt_get_ringbuf_handle failed: %s\n",
                       esp_err_to_name(err));
         return false;
     }
 
-    err = rmt_enable(rxChannel);
-    if (err != ESP_OK) {
-        Serial.printf("ERROR rmt_enable: %s\n", esp_err_to_name(err));
-        return false;
-    }
-
-    Serial.println("RMT RX ready: GPIO15, resolution 1 MHz");
+    Serial.println("RMT RX ready: GPIO15, resolution 1 us");
     return true;
 }
 
-
-static bool armRMT()
+static void addPulse(uint16_t duration, uint8_t level)
 {
-    rmt_receive_config_t receiveConfig = {};
+    if (duration == 0) return;
 
-    // RMT wymaga wartości poniżej limitu sterownika.
-    // 1000 ns = 1 us; nie oznacza to, że będziemy dekodować
-    // impulsy 1-us, ponieważ ich interpretacją zajmiemy się później.
-    receiveConfig.signal_range_min_ns = 1000;
-
-    // Zakończ odbiór po stabilnym poziomie trwającym 10 ms.
-    receiveConfig.signal_range_max_ns = 10000000;
-
-    esp_err_t err = rmt_receive(
-        rxChannel,
-        rmtBuffer,
-        sizeof(rmtBuffer),
-        &receiveConfig
-    );
-
-    if (err != ESP_OK) {
-        Serial.printf(
-            "ERROR rmt_receive: %s\n",
-            esp_err_to_name(err)
-        );
-        return false;
+    if (pulseCount >= MAX_PULSES) {
+        pulseOverflow = true;
+        return;
     }
 
-    return true;
+    pulses[pulseCount++] = {duration, level};
 }
 
-static void appendSymbols(const RxEvent &event)
+static void appendRmtItems(const rmt_item32_t *items, size_t count)
 {
-    size_t count = event.numSymbols;
-
-    if (count > RMT_BUFFER_SYMBOLS) {
-        count = RMT_BUFFER_SYMBOLS;
+    if (segmentCount >= MAX_SEGMENTS) {
+        segmentOverflow = true;
+        return;
     }
+
+    segmentStarts[segmentCount] = pulseCount;
 
     for (size_t i = 0; i < count; i++) {
-        if (capturedCount >= MAX_CAPTURE_SYMBOLS) {
-            captureOverflow = true;
-            return;
-        }
+        addPulse(items[i].duration0, items[i].level0);
+        addPulse(items[i].duration1, items[i].level1);
 
-        captured[capturedCount++] = event.symbols[i];
+        if (pulseOverflow) break;
+    }
+
+    segmentEnds[segmentCount] = pulseCount;
+    segmentCount++;
+}
+
+static void drainRingbuffer()
+{
+    while (true) {
+        size_t itemSize = 0;
+        void *data = xRingbufferReceive(rxRingbuffer, &itemSize, 0);
+
+        if (data == nullptr) break;
+
+        vRingbufferReturnItem(rxRingbuffer, data);
     }
 }
 
-static void printCapture(char command)
+static void printAnalysis(char command)
 {
+    uint32_t histogram[21] = {};
+    uint32_t totalUs = 0;
+    uint16_t minUs = 65535;
+    uint16_t maxUs = 0;
+
+    for (size_t i = 0; i < pulseCount; i++) {
+        uint16_t us = pulses[i].us;
+
+        if (us < minUs) minUs = us;
+        if (us > maxUs) maxUs = us;
+        totalUs += us;
+
+        size_t bin = (us + 250) / 500;
+        if (bin >= 21) bin = 20;
+
+        histogram[bin]++;
+    }
+
     Serial.println();
-    Serial.printf("=== RMT CAPTURE '%c' ===\n", command);
-    Serial.printf("Symbols: %u\n", (unsigned)capturedCount);
-    Serial.printf("Buffer overflow: %s\n",
-                  captureOverflow ? "YES" : "NO");
+    Serial.printf("========== ANALYSIS '%c' ==========\n", command);
+    Serial.printf("Pulses: %u\n", (unsigned)pulseCount);
+    Serial.printf("RMT segments: %u\n", (unsigned)segmentCount);
+    Serial.printf("Pulse buffer overflow: %s\n",
+                  pulseOverflow ? "YES" : "NO");
+    Serial.printf("Segment buffer overflow: %s\n",
+                  segmentOverflow ? "YES" : "NO");
 
-    Serial.println("Index | duration0 level0 | duration1 level1");
-    Serial.println("------+------------------+------------------");
-
-    for (size_t i = 0; i < capturedCount; i++) {
-        const rmt_symbol_word_t &s = captured[i];
-
+    if (pulseCount > 0) {
         Serial.printf(
-            "%04u | %5u us   %u     | %5u us   %u\n",
-            (unsigned)i,
-            (unsigned)s.duration0,
-            (unsigned)s.level0,
-            (unsigned)s.duration1,
-            (unsigned)s.level1
+            "Duration min/max/avg: %u / %u / %lu us\n",
+            minUs,
+            maxUs,
+            (unsigned long)(totalUs / pulseCount)
         );
     }
 
-    Serial.println("=== END CAPTURE ===");
+    Serial.println("\nDuration histogram (nearest 500 us):");
+
+    for (size_t i = 0; i < 21; i++) {
+        if (histogram[i] == 0) continue;
+
+        Serial.printf("%5u us : %lu\n",
+                      (unsigned)(i * 500),
+                      (unsigned long)histogram[i]);
+    }
+
+    Serial.println("\nRMT segments:");
+
+    for (size_t i = 0; i < segmentCount; i++) {
+        size_t first = segmentStarts[i];
+        size_t last = segmentEnds[i];
+
+        Serial.printf("SEG %03u: %u pulses | ",
+                      (unsigned)i,
+                      (unsigned)(last - first));
+
+        size_t shown = last - first;
+        if (shown > 30) shown = 30;
+
+        for (size_t j = 0; j < shown; j++) {
+            const Pulse &p = pulses[first + j];
+
+            Serial.printf("%u%c",
+                          p.us,
+                          p.level ? 'H' : 'L');
+
+            if (j + 1 < shown) Serial.print(' ');
+        }
+
+        if (last - first > shown) Serial.print(" ...");
+        Serial.println();
+    }
+
+    Serial.println("========== END ANALYSIS ==========");
     Serial.println();
 }
 
-static void captureForOneSecond(char command)
+static void captureCommand(char command)
 {
-    capturedCount = 0;
-    captureOverflow = false;
+    pulseCount = 0;
+    segmentCount = 0;
+    pulseOverflow = false;
+    segmentOverflow = false;
 
-    // Drain any stale event before starting.
-    RxEvent stale;
-    while (xQueueReceive(rxQueue, &stale, 0) == pdTRUE) {
+    drainRingbuffer();
+
+    Serial.printf(
+        "\nCapturing '%c' for %lu ms. Hold the remote button now.\n",
+        command,
+        (unsigned long)CAPTURE_MS
+    );
+
+    esp_err_t err = rmt_rx_start(RMT_CHANNEL, true);
+    if (err != ESP_OK) {
+        Serial.printf("rmt_rx_start failed: %s\n", esp_err_to_name(err));
+        return;
     }
-
-    Serial.printf("Capturing for %lu ms... press/hold '%c' on the remote now.\n",
-                  (unsigned long)CAPTURE_MS, command);
 
     const uint32_t started = millis();
-    uint32_t lastArmError = 0;
-    bool armed = armRMT();
 
-    while ((uint32_t)(millis() - started) < CAPTURE_MS) {
-        RxEvent event;
+    while ((uint32_t)(millis() - started) < CAPTURE_MS &&
+           !pulseOverflow &&
+           !segmentOverflow) {
 
-        if (xQueueReceive(rxQueue, &event, pdMS_TO_TICKS(20)) == pdTRUE) {
-            appendSymbols(event);
+        size_t itemSize = 0;
 
-            if (capturedCount < MAX_CAPTURE_SYMBOLS &&
-                (uint32_t)(millis() - started) < CAPTURE_MS) {
-                armed = armRMT();
-                if (!armed) {
-                    lastArmError = millis();
-                    vTaskDelay(pdMS_TO_TICKS(2));
-                }
-            }
-        } else if (!armed) {
-            if ((uint32_t)(millis() - lastArmError) >= 20) {
-                armed = armRMT();
-                lastArmError = millis();
-            }
+        // Odbieramy kolejne fragmenty zakończone przerwą na GDO0.
+        void *data = xRingbufferReceive(
+            rxRingbuffer,
+            &itemSize,
+            pdMS_TO_TICKS(20)
+        );
+
+        if (data == nullptr) continue;
+
+        if (itemSize % sizeof(rmt_item32_t) == 0) {
+            const size_t count = itemSize / sizeof(rmt_item32_t);
+
+            appendRmtItems(
+                static_cast<const rmt_item32_t *>(data),
+                count
+            );
+        } else {
+            Serial.printf("Warning: unexpected RMT buffer size: %u\n",
+                          (unsigned)itemSize);
         }
+
+        vRingbufferReturnItem(rxRingbuffer, data);
     }
 
-    // Stop any pending receive operation cleanly.
-    rmt_disable(rxChannel);
-    rmt_enable(rxChannel);
+    rmt_rx_stop(RMT_CHANNEL);
 
-    printCapture(command);
+    // Opróżnij ewentualny ostatni fragment, który dotarł przy zatrzymaniu.
+    while (true) {
+        size_t itemSize = 0;
+        void *data = xRingbufferReceive(rxRingbuffer, &itemSize, 0);
+
+        if (data == nullptr) break;
+
+        if (itemSize % sizeof(rmt_item32_t) == 0 &&
+            !pulseOverflow &&
+            !segmentOverflow) {
+
+            appendRmtItems(
+                static_cast<const rmt_item32_t *>(data),
+                itemSize / sizeof(rmt_item32_t)
+            );
+        }
+
+        vRingbufferReturnItem(rxRingbuffer, data);
+    }
+
+    printAnalysis(command);
 }
 
 void setup()
@@ -340,24 +396,19 @@ void setup()
     Serial.begin(115200);
     delay(1000);
 
-    Serial.println();
-    Serial.println("CC2500 + ESP32-S3 hardware RMT capture");
+    Serial.println("\nCC2500 + ESP32-S3 legacy RMT analyzer");
 
     setupCC2500();
 
     if (!setupRMT()) {
-        Serial.println("RMT setup failed; stopping.");
-        while (true) {
-            delay(1000);
-        }
+        Serial.println("Initialization failed.");
+        while (true) delay(1000);
     }
 
-    Serial.println();
-    Serial.println("Commands:");
-    Serial.println("  i = capture idle/no button");
-    Serial.println("  o = capture while pressing ON");
-    Serial.println("  f = capture while pressing OFF");
-    Serial.println();
+    Serial.println("\nCommands:");
+    Serial.println("  i = idle");
+    Serial.println("  o = ON (hold during capture)");
+    Serial.println("  f = OFF (hold during capture)");
 }
 
 void loop()
@@ -374,7 +425,7 @@ void loop()
     }
 
     if (command == 'i' || command == 'o' || command == 'f') {
-        captureForOneSecond(command);
+        captureCommand(command);
     } else {
         Serial.println("Unknown command. Use i, o or f.");
     }
