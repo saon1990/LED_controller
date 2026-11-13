@@ -1,588 +1,220 @@
-
 #include "RemoteManager.h"
-
 #include <string.h>
-
 #include "RemoteProtocol.h"
 #include "RemoteRadio.h"
-
 #include "../LED/LedController.h"
 #include "../STORAGE/EepromManager.h"
 #include "../RTC/RtcManager.h"
 #include "../config.h"
 
-// Obiekty są zdefiniowane w main.cpp.
 extern LedController led;
 extern EepromManager storage;
 extern bool saveCurrentState();
 
 namespace REMOTE {
-
 namespace {
+constexpr uint8_t NRF_CE=15, NRF_CSN=7, NRF_SCK=4, NRF_MISO=6, NRF_MOSI=5;
+constexpr uint8_t NRF_CHANNEL=10, RX_LENGTH=12;
+constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS=600;
 
-constexpr uint8_t NRF_CE   = 15;
-constexpr uint8_t NRF_CSN  = 7;
-constexpr uint8_t NRF_SCK  = 4;
-constexpr uint8_t NRF_MISO = 6;
-constexpr uint8_t NRF_MOSI = 5;
+RemoteAction lastSpeedAction=RemoteAction::SPEED_MINUS;
+uint32_t lastSpeedPacketMillis=0;
+bool speedActionSeen=false;
 
-constexpr uint8_t NRF_CHANNEL = 10;
-constexpr uint8_t RX_LENGTH = 12;
-
-// ------------------------------------------------------------
-// SPEED BUTTON REPEAT FILTER
-// ------------------------------------------------------------
-
-constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS = 600;
-
-RemoteAction lastSpeedAction = RemoteAction::SPEED_MINUS;
-uint32_t lastSpeedPacketMillis = 0;
-bool speedActionSeen = false;
-
-static const RemoteAction ACTIONS[] = {
-    RemoteAction::ON,
-    RemoteAction::OFF,
-    RemoteAction::SUN_TOP,
-    RemoteAction::MODE,
-    RemoteAction::O_MINUS,
-    RemoteAction::WHITE,
-    RemoteAction::O_PLUS,
-    RemoteAction::SPEED_MINUS,
-    RemoteAction::SUN_BOTTOM,
-    RemoteAction::SPEED_PLUS,
-
-    RemoteAction::GROUP_1_TOP,
-    RemoteAction::GROUP_1_BOTTOM,
-    RemoteAction::GROUP_2_TOP,
-    RemoteAction::GROUP_2_BOTTOM,
-    RemoteAction::GROUP_3_TOP,
-    RemoteAction::GROUP_3_BOTTOM,
-    RemoteAction::GROUP_4_TOP,
+static const RemoteAction ACTIONS[]={
+    RemoteAction::ON, RemoteAction::OFF, RemoteAction::SUN_TOP,
+    RemoteAction::MODE, RemoteAction::O_MINUS, RemoteAction::WHITE,
+    RemoteAction::O_PLUS, RemoteAction::SPEED_MINUS, RemoteAction::SUN_BOTTOM,
+    RemoteAction::SPEED_PLUS, RemoteAction::GROUP_1_TOP,
+    RemoteAction::GROUP_1_BOTTOM, RemoteAction::GROUP_2_TOP,
+    RemoteAction::GROUP_2_BOTTOM, RemoteAction::GROUP_3_TOP,
+    RemoteAction::GROUP_3_BOTTOM, RemoteAction::GROUP_4_TOP,
     RemoteAction::GROUP_4_BOTTOM
 };
 
-bool isSpeedAction(RemoteAction action)
-{
-    return (
-        action == RemoteAction::SPEED_PLUS ||
-        action == RemoteAction::SPEED_MINUS
-    );
+bool isSpeedAction(RemoteAction a) {
+    return a==RemoteAction::SPEED_PLUS || a==RemoteAction::SPEED_MINUS;
 }
-
-bool shouldHandleSpeedAction(
-    RemoteAction action,
-    uint8_t command)
-{
-    if (!isSpeedAction(action))
-        return true;
-
-    const uint32_t now = millis();
-
-    // Bit 7 oznacza powtórzenie/przytrzymanie przycisku.
-    if (command & 0x80)
-    {
-        lastSpeedAction = action;
-        lastSpeedPacketMillis = now;
-        speedActionSeen = true;
-
-        Serial.println(
-            "[REMOTE] SPEED ACTION IGNORED - REPEAT FLAG"
-        );
-
-        return false;
+bool shouldHandleSpeedAction(RemoteAction a,uint8_t command) {
+    if(!isSpeedAction(a)) return true;
+    const uint32_t now=millis();
+    if(command&0x80) {
+        lastSpeedAction=a; lastSpeedPacketMillis=now; speedActionSeen=true;
+        Serial.println("[REMOTE] SPEED ACTION IGNORED - REPEAT FLAG"); return false;
     }
-
-    // Kolejne pakiety tego samego przycisku traktujemy
-    // jako powtórzenia jednego fizycznego naciśnięcia.
-    if (
-        speedActionSeen &&
-        action == lastSpeedAction &&
-        now - lastSpeedPacketMillis < SPEED_REPEAT_TIMEOUT_MS
-    )
-    {
-        lastSpeedPacketMillis = now;
-
-        Serial.println(
-            "[REMOTE] SPEED ACTION IGNORED - DUPLICATE"
-        );
-
-        return false;
+    if(speedActionSeen && a==lastSpeedAction && now-lastSpeedPacketMillis<SPEED_REPEAT_TIMEOUT_MS) {
+        lastSpeedPacketMillis=now;
+        Serial.println("[REMOTE] SPEED ACTION IGNORED - DUPLICATE"); return false;
     }
-
-    lastSpeedAction = action;
-    lastSpeedPacketMillis = now;
-    speedActionSeen = true;
-
-    return true;
+    lastSpeedAction=a; lastSpeedPacketMillis=now; speedActionSeen=true; return true;
 }
-
-uint8_t reverseBits(uint8_t value)
-{
-    value = (value & 0xF0) >> 4 | (value & 0x0F) << 4;
-    value = (value & 0xCC) >> 2 | (value & 0x33) << 2;
-    value = (value & 0xAA) >> 1 | (value & 0x55) << 1;
-
-    return value;
+uint8_t reverseBits(uint8_t v) {
+    v=(v&0xF0)>>4|(v&0x0F)<<4;
+    v=(v&0xCC)>>2|(v&0x33)<<2;
+    v=(v&0xAA)>>1|(v&0x55)<<1;
+    return v;
 }
-
-uint16_t calculateRadioCrc(
-    const uint8_t* data,
-    uint8_t length)
-{
-    uint16_t state = 0;
-
-    for (uint8_t i = 0; i < length; i++)
-    {
-        uint8_t value = data[i];
-
-        for (uint8_t bit = 0; bit < 8; bit++)
-        {
-            if ((value ^ state) & 0x01)
-                state = (state >> 1) ^ 0x8408;
-            else
-                state >>= 1;
-
-            value >>= 1;
+uint16_t calculateRadioCrc(const uint8_t* data,uint8_t length) {
+    uint16_t state=0;
+    for(uint8_t i=0;i<length;i++) {
+        uint8_t value=data[i];
+        for(uint8_t bit=0;bit<8;bit++) {
+            if((value^state)&0x01) state=(state>>1)^0x8408;
+            else state>>=1;
+            value>>=1;
         }
     }
-
     return state;
 }
-
-void printHex(uint8_t value)
-{
-    if (value < 0x10)
-        Serial.print('0');
-
-    Serial.print(value, HEX);
-}
-
-void restoreLastActiveMode()
-{
-    uint8_t savedMode = 0xFF;
-
-    if (!storage.loadLastActiveLedMode(savedMode))
-    {
-        Serial.println(
-            "[REMOTE] Brak ostatniego trybu. Ustawiam STATIC WHITE."
-        );
-
+void restoreLastActiveMode() {
+    uint8_t savedMode=0xFF;
+    if(!storage.loadLastActiveLedMode(savedMode)) {
+        Serial.println("[REMOTE] Brak ostatniego trybu. Ustawiam STATIC WHITE.");
         led.setStaticWhite();
-
-        storage.saveLastActiveLedMode(
-            static_cast<uint8_t>(LedMode::STATIC_WHITE)
-        );
-
+        storage.saveLastActiveLedMode((uint8_t)LedMode::STATIC_WHITE);
         return;
     }
-
-    switch (static_cast<LedMode>(savedMode))
-    {
+    switch((LedMode)savedMode) {
         case LedMode::FLOW:
-
-            Serial.println(
-                "[REMOTE] ON -> RESTORE FLOW"
-            );
-
-            led.startFlow();
-
-            break;
-
+            Serial.println("[REMOTE] ON -> RESTORE FLOW"); led.startFlow(); break;
         case LedMode::STATIC_WHITE:
-
-            Serial.println(
-                "[REMOTE] ON -> RESTORE STATIC WHITE"
-            );
-
-            led.setStaticWhite();
-
-            break;
-
+            Serial.println("[REMOTE] ON -> RESTORE STATIC WHITE"); led.setStaticWhite(); break;
         case LedMode::BREATHING:
-
-            Serial.println(
-                "[REMOTE] ON -> RESTORE BREATHING"
-            );
-
-            led.startBreathing();
-
-            break;
-
+            Serial.println("[REMOTE] ON -> RESTORE BREATHING"); led.startBreathing(); break;
         default:
-
-            Serial.println(
-                "[REMOTE] Niepoprawny tryb. Ustawiam STATIC WHITE."
-            );
-
+            Serial.println("[REMOTE] Niepoprawny tryb. Ustawiam STATIC WHITE.");
             led.setStaticWhite();
-
-            storage.saveLastActiveLedMode(
-                static_cast<uint8_t>(LedMode::STATIC_WHITE)
-            );
-
+            storage.saveLastActiveLedMode((uint8_t)LedMode::STATIC_WHITE);
             break;
     }
 }
-
 } // namespace
 
-RemoteManager::RemoteManager()
-    : radio(NRF_CE, NRF_CSN),
-      packetCounter(0)
-{
-}
+RemoteManager::RemoteManager():radio(NRF_CE,NRF_CSN),packetCounter(0) {}
 
-bool RemoteManager::begin()
-{
+bool RemoteManager::begin() {
     Serial.println();
     Serial.println("========================================");
     Serial.println(" RC03RFB REMOTE MANAGER - RX ONLY");
     Serial.println("========================================");
-
-    SPI.begin(
-        NRF_SCK,
-        NRF_MISO,
-        NRF_MOSI,
-        NRF_CSN
-    );
-
-    if (!radio.begin())
-    {
-        Serial.println(
-            "[REMOTE] ERROR: NRF24 NOT DETECTED!"
-        );
-
-        return false;
+    SPI.begin(NRF_SCK,NRF_MISO,NRF_MOSI,NRF_CSN);
+    if(!radio.begin()) {
+        Serial.println("[REMOTE] ERROR: NRF24 NOT DETECTED!"); return false;
     }
-
     radio.setPALevel(RF24_PA_MIN);
     radio.setDataRate(RF24_1MBPS);
-
     radio.setAutoAck(false);
     radio.disableCRC();
-
     radio.setAddressWidth(RADIO_ADDRESS_SIZE);
-
-    radio.openReadingPipe(
-        1,
-        RADIO_ADDRESS
-    );
-
+    radio.openReadingPipe(1,RADIO_ADDRESS);
     radio.setPayloadSize(RX_LENGTH);
     radio.setChannel(NRF_CHANNEL);
-
     radio.flush_rx();
     radio.startListening();
-
     Serial.println("[REMOTE] NRF24 DETECTED");
     Serial.println("[REMOTE] RX MODE ACTIVE");
     Serial.println("[REMOTE] AUTO ACK: DISABLED");
     Serial.println("[REMOTE] HARDWARE CRC: DISABLED");
-
-    Serial.printf(
-        "[REMOTE] CHANNEL: %u\n",
-        NRF_CHANNEL
-    );
-
+    Serial.printf("[REMOTE] CHANNEL: %u\n",NRF_CHANNEL);
     Serial.println("[REMOTE] RECEIVER READY");
-
     return true;
 }
 
-void RemoteManager::update()
-{
-    while (radio.available())
-    {
-        uint8_t raw[RX_LENGTH] = {};
-
-        radio.read(raw, RX_LENGTH);
-
+void RemoteManager::update() {
+    while(radio.available()) {
+        uint8_t raw[RX_LENGTH]={};
+        radio.read(raw,RX_LENGTH);
         processPacket(raw);
     }
 }
 
-bool RemoteManager::decodePacket(
-    const uint8_t* raw,
-    uint8_t& command,
-    uint8_t& argument,
-    uint8_t& group)
-{
-    uint8_t logical[RX_LENGTH] = {};
-
-    for (uint8_t i = 0; i < RX_LENGTH; i++)
-        logical[i] = reverseBits(raw[i]);
-
-    if (logical[0] != 9)
-        return false;
-
-    const uint16_t calculatedCrc =
-        calculateRadioCrc(logical, 10);
-
-    const uint16_t receivedCrc =
-        static_cast<uint16_t>(logical[10]) |
-        (static_cast<uint16_t>(logical[11]) << 8);
-
-    if (calculatedCrc != receivedCrc)
-        return false;
-
-    uint8_t decoded[V2_PACKET_SIZE] = {};
-
-    if (!decodeAndValidateV2Packet(
-            &logical[1],
-            decoded))
-    {
-        return false;
-    }
-
-    const uint16_t deviceId =
-        (static_cast<uint16_t>(decoded[2]) << 8) |
-        decoded[3];
-
-    if (
-        decoded[0] != 0xEE ||
-        decoded[1] != 0x25 ||
-        deviceId != 0x275D
-    )
-    {
-        return false;
-    }
-
-    command = decoded[4];
-    argument = decoded[5];
-    group = decoded[7];
-
+bool RemoteManager::decodePacket(const uint8_t* raw,uint8_t& command,uint8_t& argument,uint8_t& group) {
+    uint8_t logical[RX_LENGTH]={};
+    for(uint8_t i=0;i<RX_LENGTH;i++) logical[i]=reverseBits(raw[i]);
+    if(logical[0]!=9) return false;
+    const uint16_t calculated=calculateRadioCrc(logical,10);
+    const uint16_t received=(uint16_t)logical[10]|((uint16_t)logical[11]<<8);
+    if(calculated!=received) return false;
+    uint8_t decoded[V2_PACKET_SIZE]={};
+    if(!decodeAndValidateV2Packet(&logical[1],decoded)) return false;
+    const uint16_t deviceId=((uint16_t)decoded[2]<<8)|decoded[3];
+    if(decoded[0]!=0xEE || decoded[1]!=0x25 || deviceId!=0x275D) return false;
+    command=decoded[4]; argument=decoded[5]; group=decoded[7];
     return true;
 }
 
-bool RemoteManager::identifyAction(
-    uint8_t command,
-    uint8_t argument,
-    uint8_t group,
-    RemoteAction& action)
-{
-    const uint8_t commandBase = command & 0x7F;
-
-    // Koło kolorów i COLOR_CYCLE pomijamy w tej wersji.
-    if (commandBase == 0x02)
-        return false;
-
-    for (
-        uint8_t i = 0;
-        i < sizeof(ACTIONS) / sizeof(ACTIONS[0]);
-        i++
-    )
-    {
-        const RemoteAction candidate = ACTIONS[i];
-
-        const uint8_t count =
-            getCommandVariantCount(candidate);
-
-        for (uint8_t v = 0; v < count; v++)
-        {
-            RemoteCommand variant = {};
-
-            if (!getCommandVariant(
-                    candidate,
-                    v,
-                    &variant))
-            {
-                continue;
-            }
-
-            if (
-                (variant.command & 0x7F) == commandBase &&
-                variant.argument == argument &&
-                variant.group == group
-            )
-            {
-                action = candidate;
-                return true;
+bool RemoteManager::identifyAction(uint8_t command,uint8_t argument,uint8_t group,RemoteAction& action) {
+    const uint8_t base=command&0x7F;
+    if(base==0x02) return false;
+    for(uint8_t i=0;i<sizeof(ACTIONS)/sizeof(ACTIONS[0]);i++) {
+        const RemoteAction candidate=ACTIONS[i];
+        const uint8_t count=getCommandVariantCount(candidate);
+        for(uint8_t v=0;v<count;v++) {
+            RemoteCommand variant={};
+            if(!getCommandVariant(candidate,v,&variant)) continue;
+            if((variant.command&0x7F)==base && variant.argument==argument && variant.group==group) {
+                action=candidate; return true;
             }
         }
     }
-
     return false;
 }
 
-bool RemoteManager::processPacket(const uint8_t* raw)
-{
-    uint8_t command = 0;
-    uint8_t argument = 0;
-    uint8_t group = 0;
-
-    if (!decodePacket(
-            raw,
-            command,
-            argument,
-            group))
-    {
-        return false;
-    }
-
+bool RemoteManager::processPacket(const uint8_t* raw) {
+    uint8_t command=0,argument=0,group=0;
+    if(!decodePacket(raw,command,argument,group)) return false;
     packetCounter++;
+    Serial.printf("[REMOTE] PACKET #%lu | CMD=0x%02X ARG=0x%02X GROUP=0x%02X\n",
+                  (unsigned long)packetCounter,command,argument,group);
 
-    Serial.printf(
-        "[REMOTE] PACKET #%lu | CMD=0x%02X ARG=0x%02X GROUP=0x%02X\n",
-        static_cast<unsigned long>(packetCounter),
-        command,
-        argument,
-        group
-    );
+    // RC03RFB color wheel: CMD 0x02, ARG carries 8-bit Hue.
+    if((command&0x7F)==0x02) {
+        led.setColorFromHue(argument);
+        return true;
+    }
 
     RemoteAction action;
-
-    if (!identifyAction(
-            command,
-            argument,
-            group,
-            action))
-    {
-        if ((command & 0x7F) == 0x02)
-        {
-            Serial.println(
-                "[REMOTE] COLOR CONTROL - IGNORED"
-            );
-        }
-        else
-        {
-            Serial.println(
-                "[REMOTE] UNKNOWN COMMAND"
-            );
-        }
-
-        return false;
+    if(!identifyAction(command,argument,group,action)) {
+        Serial.println("[REMOTE] UNKNOWN COMMAND"); return false;
     }
-
-    Serial.printf(
-        "[REMOTE] ACTION: %s\n",
-        getActionName(action)
-    );
-
-    // Filtrujemy wyłącznie SPEED_PLUS i SPEED_MINUS.
-    // Pozostałe przyciski działają bez zmian.
-
-    if (!shouldHandleSpeedAction(action, command))
-        return true;
-
+    Serial.printf("[REMOTE] ACTION: %s\n",getActionName(action));
+    if(!shouldHandleSpeedAction(action,command)) return true;
     handleAction(action);
-
     return true;
 }
 
-void RemoteManager::handleAction(RemoteAction action)
-{
-    const LedMode previousMode = led.getMode();
-
-    switch (action)
-    {
+void RemoteManager::handleAction(RemoteAction action) {
+    const LedMode previousMode=led.getMode();
+    switch(action) {
         case RemoteAction::ON:
-
-            Serial.println("[REMOTE] ON");
-
-            restoreLastActiveMode();
-
-            break;
-
+            Serial.println("[REMOTE] ON"); restoreLastActiveMode(); break;
         case RemoteAction::WHITE:
-
-            Serial.println("[REMOTE] WHITE");
-
-            led.setStaticWhite();
-
-            storage.saveLastActiveLedMode(
-                static_cast<uint8_t>(LedMode::STATIC_WHITE)
-            );
-
-            break;
-
+            Serial.println("[REMOTE] WHITE"); led.setStaticWhite();
+            storage.saveLastActiveLedMode((uint8_t)LedMode::STATIC_WHITE); break;
         case RemoteAction::OFF:
-
             Serial.println("[REMOTE] OFF");
-
-            // LedController zachowuje dotychczasową animację FLOW_OFF.
-            // Nie zmieniamy ostatniego aktywnego trybu.
-
-            if (led.isOn())
-            {
-                led.turnOff();
-            }
-            else
-            {
-                led.resetEffectSpeed();
-            }
-
+            if(led.isOn()) led.turnOff(); else led.resetEffectSpeed();
             break;
-
         case RemoteAction::SPEED_PLUS:
-
-            Serial.println("[REMOTE] SPEED PLUS");
-
-            led.increaseEffectSpeed();
-
-            break;
-
+            Serial.println("[REMOTE] SPEED PLUS"); led.increaseEffectSpeed(); break;
         case RemoteAction::SPEED_MINUS:
-
-            Serial.println("[REMOTE] SPEED MINUS");
-
-            led.decreaseEffectSpeed();
-
-            break;
-
+            Serial.println("[REMOTE] SPEED MINUS"); led.decreaseEffectSpeed(); break;
         case RemoteAction::GROUP_1_TOP:
-
-            Serial.println("[REMOTE] GROUP 1 TOP -> FLOW");
-
-            led.startFlow();
-
-            storage.saveLastActiveLedMode(
-                static_cast<uint8_t>(LedMode::FLOW)
-            );
-
-            break;
-
+            Serial.println("[REMOTE] GROUP 1 TOP -> FLOW"); led.startFlow();
+            storage.saveLastActiveLedMode((uint8_t)LedMode::FLOW); break;
         case RemoteAction::GROUP_2_TOP:
-
-            Serial.println("[REMOTE] GROUP 2 TOP -> BREATHING");
-
-            led.startBreathing();
-
-            storage.saveLastActiveLedMode(
-                static_cast<uint8_t>(LedMode::BREATHING)
-            );
-
-            break;
-
+            Serial.println("[REMOTE] GROUP 2 TOP -> BREATHING WHITE");
+            led.startBreathing(0,0,0,255);
+            storage.saveLastActiveLedMode((uint8_t)LedMode::BREATHING); break;
         default:
-
-            Serial.printf(
-                "[REMOTE] ACTION %s - NOT IMPLEMENTED\n",
-                getActionName(action)
-            );
-
-            break;
+            Serial.printf("[REMOTE] ACTION %s - NOT IMPLEMENTED\n",getActionName(action)); break;
     }
-
-    // Natychmiastowy zapis aktualnego stanu po zmianie trybu.
-    // Powtarzane pakiety pilota nie powodują dodatkowych zapisów.
-
-    const LedMode currentMode = led.getMode();
-
-    if (currentMode != previousMode)
-    {
-        Serial.printf(
-            "[REMOTE] MODE CHANGE: 0x%02X -> 0x%02X\n",
-            static_cast<uint8_t>(previousMode),
-            static_cast<uint8_t>(currentMode)
-        );
-
-        if (!saveCurrentState())
-        {
-            Serial.println(
-                "[REMOTE] ERROR: nie udalo sie zapisac aktualnego stanu LED."
-            );
-        }
+    const LedMode currentMode=led.getMode();
+    if(currentMode!=previousMode) {
+        Serial.printf("[REMOTE] MODE CHANGE: 0x%02X -> 0x%02X\n",
+                      (uint8_t)previousMode,(uint8_t)currentMode);
+        if(!saveCurrentState())
+            Serial.println("[REMOTE] ERROR: nie udalo sie zapisac aktualnego stanu LED.");
     }
 }
-
 } // namespace REMOTE
