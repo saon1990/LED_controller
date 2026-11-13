@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <Wire.h>
 
@@ -25,6 +26,7 @@ REMOTE::RemoteManager remote;
 void setLedOn();
 void setLedOff();
 void setLedFlow();
+void setLedBreathing();
 
 bool saveCurrentState();
 void checkPowerLoss();
@@ -44,7 +46,8 @@ bool saveLastActiveMode(uint8_t mode)
 {
     if (
         mode != static_cast<uint8_t>(LedMode::STATIC_WHITE) &&
-        mode != static_cast<uint8_t>(LedMode::FLOW)
+        mode != static_cast<uint8_t>(LedMode::FLOW) &&
+        mode != static_cast<uint8_t>(LedMode::BREATHING)
     )
     {
         return false;
@@ -59,10 +62,6 @@ bool saveLastActiveMode(uint8_t mode)
 
 void setLedOn()
 {
-    saveLastActiveMode(
-        static_cast<uint8_t>(LedMode::STATIC_WHITE)
-    );
-
     if (led.getMode() == LedMode::STATIC_WHITE)
     {
         Serial.println(
@@ -72,9 +71,11 @@ void setLedOn()
         return;
     }
 
-    Serial.println(
-        "[LED] ON - STATIC WHITE"
+    saveLastActiveMode(
+        static_cast<uint8_t>(LedMode::STATIC_WHITE)
     );
+
+    Serial.println("[LED] ON - STATIC WHITE");
 
     led.turnOn();
 
@@ -92,10 +93,6 @@ void setLedOn()
 
 void setLedFlow()
 {
-    saveLastActiveMode(
-        static_cast<uint8_t>(LedMode::FLOW)
-    );
-
     if (led.getMode() == LedMode::FLOW)
     {
         Serial.println(
@@ -105,9 +102,11 @@ void setLedFlow()
         return;
     }
 
-    Serial.println(
-        "[LED] FLOW - START"
+    saveLastActiveMode(
+        static_cast<uint8_t>(LedMode::FLOW)
     );
+
+    Serial.println("[LED] FLOW - START");
 
     led.startFlow();
 
@@ -115,6 +114,37 @@ void setLedFlow()
     {
         Serial.println(
             "[LED] UWAGA: nie zapisano trybu FLOW."
+        );
+    }
+}
+
+// ============================================================
+// BREATHING
+// ============================================================
+
+void setLedBreathing()
+{
+    if (led.getMode() == LedMode::BREATHING)
+    {
+        Serial.println(
+            "[LED] BREATHING juz aktywny."
+        );
+
+        return;
+    }
+
+    saveLastActiveMode(
+        static_cast<uint8_t>(LedMode::BREATHING)
+    );
+
+    Serial.println("[LED] BREATHING - START");
+
+    led.startBreathing();
+
+    if (!saveCurrentState())
+    {
+        Serial.println(
+            "[LED] UWAGA: nie zapisano trybu BREATHING."
         );
     }
 }
@@ -134,9 +164,7 @@ void setLedOff()
         return;
     }
 
-    Serial.println(
-        "[LED] OFF - STOP"
-    );
+    Serial.println("[LED] OFF - STOP");
 
     // Nie nadpisujemy ostatniego aktywnego trybu.
     // LedController sam obsługuje FLOW_OFF.
@@ -179,6 +207,10 @@ void handleSerialCommands()
                 setLedFlow();
                 break;
 
+            case '3':
+                setLedBreathing();
+                break;
+
             case '0':
                 setLedOff();
                 break;
@@ -187,6 +219,7 @@ void handleSerialCommands()
                 Serial.println("[SERIAL] Nieznana komenda.");
                 Serial.println("1 = STATIC WHITE");
                 Serial.println("2 = FLOW");
+                Serial.println("3 = BREATHING");
                 Serial.println("0 = OFF");
                 break;
         }
@@ -302,10 +335,6 @@ void checkPowerLoss()
     // MIGRACJA STAREGO ZAPISU
     // --------------------------------------------------------
 
-    // Jeśli nowy zapis ostatniego aktywnego trybu jeszcze
-    // nie istnieje, a stary zapis wskazuje aktywny tryb,
-    // wykorzystujemy go do inicjalizacji nowej komórki.
-
     uint8_t lastActiveMode = 0xFF;
 
     if (!storage.loadLastActiveLedMode(lastActiveMode))
@@ -316,7 +345,9 @@ void checkPowerLoss()
                 savedMode ==
                     static_cast<uint8_t>(LedMode::STATIC_WHITE) ||
                 savedMode ==
-                    static_cast<uint8_t>(LedMode::FLOW)
+                    static_cast<uint8_t>(LedMode::FLOW) ||
+                savedMode ==
+                    static_cast<uint8_t>(LedMode::BREATHING)
             )
         )
         {
@@ -486,6 +517,16 @@ void checkPowerLoss()
 
             break;
 
+        case LedMode::BREATHING:
+
+            Serial.println(
+                "[POWER] Przywracam BREATHING."
+            );
+
+            led.restoreMode(LedMode::BREATHING);
+
+            break;
+
         default:
 
             Serial.println(
@@ -584,6 +625,7 @@ void setup()
     Serial.println("STEROWANIE SERIAL:");
     Serial.println("1 = STATIC WHITE");
     Serial.println("2 = FLOW");
+    Serial.println("3 = BREATHING");
     Serial.println("0 = OFF");
 
     Serial.println();

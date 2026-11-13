@@ -1,3 +1,4 @@
+
 #include "RemoteManager.h"
 
 #include <string.h>
@@ -13,6 +14,7 @@
 // Obiekty są zdefiniowane w main.cpp.
 extern LedController led;
 extern EepromManager storage;
+extern bool saveCurrentState();
 
 namespace REMOTE {
 
@@ -101,6 +103,7 @@ void restoreLastActiveMode()
         );
 
         led.setStaticWhite();
+
         storage.saveLastActiveLedMode(
             static_cast<uint8_t>(LedMode::STATIC_WHITE)
         );
@@ -130,6 +133,16 @@ void restoreLastActiveMode()
 
             break;
 
+        case LedMode::BREATHING:
+
+            Serial.println(
+                "[REMOTE] ON -> RESTORE BREATHING"
+            );
+
+            led.startBreathing();
+
+            break;
+
         default:
 
             Serial.println(
@@ -144,8 +157,6 @@ void restoreLastActiveMode()
 
             break;
     }
-
-    // Aktualny stan i timestamp zapisuje główna aplikacja.
 }
 
 } // namespace
@@ -202,6 +213,7 @@ bool RemoteManager::begin()
     Serial.println("[REMOTE] RX MODE ACTIVE");
     Serial.println("[REMOTE] AUTO ACK: DISABLED");
     Serial.println("[REMOTE] HARDWARE CRC: DISABLED");
+
     Serial.printf(
         "[REMOTE] CHANNEL: %u\n",
         NRF_CHANNEL
@@ -289,9 +301,11 @@ bool RemoteManager::identifyAction(
     if (commandBase == 0x02)
         return false;
 
-    for (uint8_t i = 0;
-         i < sizeof(ACTIONS) / sizeof(ACTIONS[0]);
-         i++)
+    for (
+        uint8_t i = 0;
+        i < sizeof(ACTIONS) / sizeof(ACTIONS[0]);
+        i++
+    )
     {
         const RemoteAction candidate = ACTIONS[i];
 
@@ -386,6 +400,8 @@ bool RemoteManager::processPacket(const uint8_t* raw)
 
 void RemoteManager::handleAction(RemoteAction action)
 {
+    const LedMode previousMode = led.getMode();
+
     switch (action)
     {
         case RemoteAction::ON:
@@ -434,6 +450,18 @@ void RemoteManager::handleAction(RemoteAction action)
 
             break;
 
+        case RemoteAction::GROUP_2_TOP:
+
+            Serial.println("[REMOTE] GROUP 2 TOP -> BREATHING");
+
+            led.startBreathing();
+
+            storage.saveLastActiveLedMode(
+                static_cast<uint8_t>(LedMode::BREATHING)
+            );
+
+            break;
+
         default:
 
             Serial.printf(
@@ -442,6 +470,27 @@ void RemoteManager::handleAction(RemoteAction action)
             );
 
             break;
+    }
+
+    // Natychmiastowy zapis aktualnego stanu po zmianie trybu.
+    // Powtarzane pakiety pilota nie powodują dodatkowych zapisów.
+
+    const LedMode currentMode = led.getMode();
+
+    if (currentMode != previousMode)
+    {
+        Serial.printf(
+            "[REMOTE] MODE CHANGE: 0x%02X -> 0x%02X\n",
+            static_cast<uint8_t>(previousMode),
+            static_cast<uint8_t>(currentMode)
+        );
+
+        if (!saveCurrentState())
+        {
+            Serial.println(
+                "[REMOTE] ERROR: nie udalo sie zapisac aktualnego stanu LED."
+            );
+        }
     }
 }
 

@@ -2,6 +2,8 @@
 #include "LedController.h"
 #include "config.h"
 
+#include <math.h>
+
 // ============================================================
 // CONSTRUCTOR
 // ============================================================
@@ -14,7 +16,13 @@ LedController::LedController()
       mode(LedMode::OFF),
       animation(LedAnimation::NONE),
       animationFront(0.0f),
-      lastFrameMillis(0)
+      lastFrameMillis(0),
+      breathingStartMillis(0),
+      breathingCycleMs(BREATHING_CYCLE_MS),
+      breathingR(0),
+      breathingG(0),
+      breathingB(0),
+      breathingW(255)
 {
 }
 
@@ -130,9 +138,6 @@ void LedController::setStaticWhite()
 
 void LedController::startFlow()
 {
-    // Jeżeli FLOW jest już aktywny,
-    // nie uruchamiamy go ponownie.
-
     if (
         mode == LedMode::FLOW &&
         animation != LedAnimation::FLOW_OFF
@@ -144,9 +149,6 @@ void LedController::startFlow()
     // --------------------------------------------------------
     // REVERSE FLOW OFF
     // --------------------------------------------------------
-
-    // Jeżeli trwa wygaszanie FLOW_OFF,
-    // odwracamy kierunek animacji bez resetowania pozycji.
 
     if (animation == LedAnimation::FLOW_OFF)
     {
@@ -166,9 +168,6 @@ void LedController::startFlow()
     // NEW FLOW
     // --------------------------------------------------------
 
-    // Jeżeli poprzednia animacja została zakończona
-    // lub taśma jest wyłączona, rozpoczynamy od początku.
-
     mode = LedMode::FLOW;
     animation = LedAnimation::FLOW_ON;
 
@@ -177,6 +176,50 @@ void LedController::startFlow()
     lastFrameMillis = millis() - FRAME_TIME;
 
     Serial.println("[LED] MODE: FLOW - START");
+}
+
+// ============================================================
+// START BREATHING
+// ============================================================
+
+void LedController::startBreathing(
+    uint8_t r,
+    uint8_t g,
+    uint8_t b,
+    uint8_t w)
+{
+    // Jeżeli BREATHING już działa z tym samym kolorem,
+    // nie restartujemy animacji.
+    //
+    // Chroni to przed resetowaniem cyklu przez powtarzane
+    // pakiety pilota GROUP_2_TOP oraz ON.
+
+    if (
+        mode == LedMode::BREATHING &&
+        animation == LedAnimation::BREATHING &&
+        breathingR == r &&
+        breathingG == g &&
+        breathingB == b &&
+        breathingW == w
+    )
+    {
+        return;
+    }
+
+    mode = LedMode::BREATHING;
+    animation = LedAnimation::BREATHING;
+
+    breathingR = r;
+    breathingG = g;
+    breathingB = b;
+    breathingW = w;
+
+    breathingCycleMs = BREATHING_CYCLE_MS;
+    breathingStartMillis = millis();
+
+    lastFrameMillis = millis() - FRAME_TIME;
+
+    Serial.println("[LED] MODE: BREATHING - START");
 }
 
 // ============================================================
@@ -194,9 +237,9 @@ void LedController::turnOn()
 
 void LedController::turnOff()
 {
-    // Jeżeli FLOW jest aktywny,
-    // rozpoczynamy wygaszanie od aktualnego położenia
-    // frontu animacji.
+    // --------------------------------------------------------
+    // FLOW OFF
+    // --------------------------------------------------------
 
     if (mode == LedMode::FLOW)
     {
@@ -205,13 +248,7 @@ void LedController::turnOff()
 
         animation = LedAnimation::FLOW_OFF;
 
-        // Zachowujemy aktualną pozycję animationFront.
-        // Nie zapalamy ponownie całej taśmy.
-
         lastFrameMillis = millis() - FRAME_TIME;
-
-        // Docelowy tryb jest już OFF.
-        // Dzięki temu można od razu zapisać OFF w EEPROM.
 
         mode = LedMode::OFF;
 
@@ -220,19 +257,21 @@ void LedController::turnOff()
         return;
     }
 
-    // Statyczne białe światło wyłączamy natychmiast.
+    // --------------------------------------------------------
+    // STATIC WHITE / BREATHING OFF
+    // --------------------------------------------------------
 
-    if (mode == LedMode::STATIC_WHITE)
+    if (
+        mode == LedMode::STATIC_WHITE ||
+        mode == LedMode::BREATHING
+    )
     {
         clear();
 
-        Serial.println("[LED] STATIC WHITE - OFF");
+        Serial.println("[LED] EFFECT - OFF");
 
         return;
     }
-
-    // Jeżeli LED już jest wyłączony,
-    // nie wykonujemy żadnej dodatkowej operacji.
 }
 
 // ============================================================
@@ -255,12 +294,20 @@ void LedController::restoreMode(LedMode restoredMode)
 
         case LedMode::FLOW:
 
-            // Efekt rozpoczynamy od początku.
-
             startFlow();
 
             Serial.println(
                 "[LED] RESTORE: FLOW"
+            );
+
+            break;
+
+        case LedMode::BREATHING:
+
+            startBreathing();
+
+            Serial.println(
+                "[LED] RESTORE: BREATHING"
             );
 
             break;
@@ -360,6 +407,50 @@ void LedController::renderFlowOff()
 }
 
 // ============================================================
+// RENDER BREATHING
+// ============================================================
+
+void LedController::renderBreathing()
+{
+    if (breathingCycleMs == 0)
+        return;
+
+    const unsigned long elapsed =
+        millis() - breathingStartMillis;
+
+    const float phase =
+        static_cast<float>(elapsed % breathingCycleMs) /
+        static_cast<float>(breathingCycleMs);
+
+    const float brightness =
+        0.5f - 0.5f * cosf(
+            6.28318530718f * phase
+        );
+
+    const uint8_t r =
+        static_cast<uint8_t>(breathingR * brightness);
+
+    const uint8_t g =
+        static_cast<uint8_t>(breathingG * brightness);
+
+    const uint8_t b =
+        static_cast<uint8_t>(breathingB * brightness);
+
+    const uint8_t w =
+        static_cast<uint8_t>(breathingW * brightness);
+
+    const uint32_t color =
+        makeColor(r, g, b, w);
+
+    for (uint16_t i = 0; i < LED_COUNT; i++)
+    {
+        strip.setPixelColor(i, color);
+    }
+
+    strip.show();
+}
+
+// ============================================================
 // UPDATE
 // ============================================================
 
@@ -432,6 +523,16 @@ void LedController::update()
 
         animationFront -= MOVE_SPEED;
 
+        return;
+    }
+
+    // --------------------------------------------------------
+    // BREATHING
+    // --------------------------------------------------------
+
+    if (animation == LedAnimation::BREATHING)
+    {
+        renderBreathing();
         return;
     }
 }

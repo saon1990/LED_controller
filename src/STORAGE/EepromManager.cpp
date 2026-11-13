@@ -1,3 +1,4 @@
+
 #include "EepromManager.h"
 #include "../config.h"
 
@@ -99,7 +100,7 @@ bool EepromManager::loadTimestamp(uint32_t& timestamp)
 
 bool EepromManager::saveLedMode(uint8_t mode)
 {
-    if (mode > 0x02)
+    if (mode > 0x03)
     {
         Serial.println("[STORAGE] BLAD: nieprawidlowy tryb LED.");
         return false;
@@ -143,7 +144,7 @@ bool EepromManager::loadLedMode(uint8_t& mode)
     if (!readBytes(EEPROM_LED_STATE_ADDR, &storedMode, 1))
         return false;
 
-    if (storedMode > 0x02)
+    if (storedMode > 0x03)
     {
         Serial.println("[STORAGE] Nieprawidlowy tryb LED w EEPROM.");
         return false;
@@ -164,12 +165,12 @@ bool EepromManager::loadLedMode(uint8_t& mode)
 // Address 0x0016
 // 0x01 = STATIC WHITE
 // 0x02 = FLOW
-// 0x00 and other values = invalid
+// 0x03 = BREATHING
 // ============================================================
 
 bool EepromManager::saveLastActiveLedMode(uint8_t mode)
 {
-    if (mode != 0x01 && mode != 0x02)
+    if (mode < 0x01 || mode > 0x03)
         return false;
 
     if (!writeBytes(
@@ -204,7 +205,7 @@ bool EepromManager::loadLastActiveLedMode(uint8_t& mode)
         return false;
     }
 
-    if (storedMode != 0x01 && storedMode != 0x02)
+    if (storedMode < 0x01 || storedMode > 0x03)
         return false;
 
     mode = storedMode;

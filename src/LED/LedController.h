@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <Arduino.h>
@@ -11,7 +12,8 @@ enum class LedMode : uint8_t
 {
     OFF = 0x00,
     STATIC_WHITE = 0x01,
-    FLOW = 0x02
+    FLOW = 0x02,
+    BREATHING = 0x03
 };
 
 // ============================================================
@@ -22,7 +24,8 @@ enum class LedAnimation : uint8_t
 {
     NONE,
     FLOW_ON,
-    FLOW_OFF
+    FLOW_OFF,
+    BREATHING
 };
 
 // ============================================================
@@ -45,6 +48,13 @@ public:
 
     void setStaticWhite();
     void startFlow();
+
+    void startBreathing(
+        uint8_t r = 0,
+        uint8_t g = 0,
+        uint8_t b = 0,
+        uint8_t w = 255
+    );
 
     // --------------------------------------------------------
     // Przywracanie stanu
@@ -77,6 +87,18 @@ private:
     unsigned long lastFrameMillis;
 
     // --------------------------------------------------------
+    // BREATHING
+    // --------------------------------------------------------
+
+    unsigned long breathingStartMillis;
+    uint32_t breathingCycleMs;
+
+    uint8_t breathingR;
+    uint8_t breathingG;
+    uint8_t breathingB;
+    uint8_t breathingW;
+
+    // --------------------------------------------------------
     // Funkcje pomocnicze
     // --------------------------------------------------------
 
@@ -90,6 +112,8 @@ private:
     float smoothStep(float x);
 
     void setAllWhite();
+
     void renderFlowOn();
     void renderFlowOff();
+    void renderBreathing();
 };
