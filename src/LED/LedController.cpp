@@ -48,10 +48,6 @@ bool LedController::isOn() const
     return mode != LedMode::OFF;
 }
 
-// ============================================================
-// CURRENT MODE
-// ============================================================
-
 LedMode LedController::getMode() const
 {
     return mode;
@@ -82,9 +78,6 @@ uint8_t LedController::getEffectSpeed() const
 
 uint32_t LedController::getBreathingCycleForSpeed() const
 {
-    // Czas pełnego cyklu w milisekundach.
-    // 50% rozjaśnianie + 50% ściemnianie.
-
     static const uint32_t cycleTimes[10] =
     {
         12000,  // Speed 1
@@ -118,8 +111,6 @@ void LedController::updateBreathingSpeed()
 
     const unsigned long now = millis();
 
-    // Obliczamy aktualną fazę na podstawie starego cyklu.
-
     const unsigned long elapsed =
         now - breathingStartMillis;
 
@@ -131,8 +122,6 @@ void LedController::updateBreathingSpeed()
         getBreathingCycleForSpeed();
 
     // Zachowujemy aktualną fazę animacji.
-    // Zmieniamy punkt startowy tak, aby jasność
-    // w chwili zmiany prędkości pozostała niezmieniona.
 
     breathingStartMillis =
         now - static_cast<unsigned long>(
@@ -145,6 +134,34 @@ void LedController::updateBreathingSpeed()
         "[LED] BREATHING CYCLE: %lu ms\n",
         static_cast<unsigned long>(breathingCycleMs)
     );
+}
+
+// ============================================================
+// FLOW MOVE SPEED
+// ============================================================
+
+float LedController::getFlowMoveSpeed() const
+{
+    // Przesunięcie frontu na jedną klatkę.
+    // FRAME_TIME pozostaje bez zmian.
+    //
+    // Speed 5 = dotychczasowe MOVE_SPEED = 0.35.
+
+    static const float moveSpeeds[10] =
+    {
+        0.15f,  // Speed 1
+        0.20f,  // Speed 2
+        0.24f,  // Speed 3
+        0.30f,  // Speed 4
+        0.35f,  // Speed 5
+        0.42f,  // Speed 6
+        0.49f,  // Speed 7
+        0.56f,  // Speed 8
+        0.63f,  // Speed 9
+        0.70f   // Speed 10
+    };
+
+    return moveSpeeds[effectSpeed - 1];
 }
 
 // ============================================================
@@ -177,10 +194,15 @@ void LedController::increaseEffectSpeed()
 
     effectSpeed++;
 
-    // Aktualizujemy tempo wyłącznie dla BREATHING.
-    // FLOW na tym etapie pozostaje bez zmian.
-
     updateBreathingSpeed();
+
+    if (mode == LedMode::FLOW)
+    {
+        Serial.printf(
+            "[LED] FLOW MOVE SPEED: %.2f\n",
+            getFlowMoveSpeed()
+        );
+    }
 
     Serial.printf(
         "[LED] EFFECT SPEED: %u/%u\n",
@@ -219,10 +241,15 @@ void LedController::decreaseEffectSpeed()
 
     effectSpeed--;
 
-    // Aktualizujemy tempo wyłącznie dla BREATHING.
-    // FLOW na tym etapie pozostaje bez zmian.
-
     updateBreathingSpeed();
+
+    if (mode == LedMode::FLOW)
+    {
+        Serial.printf(
+            "[LED] FLOW MOVE SPEED: %.2f\n",
+            getFlowMoveSpeed()
+        );
+    }
 
     Serial.printf(
         "[LED] EFFECT SPEED: %u/%u\n",
@@ -464,7 +491,6 @@ void LedController::turnOff()
         return;
     }
 
-    // Jeżeli LED są już wyłączone, również resetujemy prędkość.
     resetEffectSpeed();
 }
 
@@ -689,7 +715,7 @@ void LedController::update()
 
         renderFlowOn();
 
-        animationFront += MOVE_SPEED;
+        animationFront += getFlowMoveSpeed();
 
         return;
     }
@@ -715,7 +741,7 @@ void LedController::update()
 
         renderFlowOff();
 
-        animationFront -= MOVE_SPEED;
+        animationFront -= getFlowMoveSpeed();
 
         return;
     }
