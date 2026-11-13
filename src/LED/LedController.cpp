@@ -17,6 +17,7 @@ LedController::LedController()
       animation(LedAnimation::NONE),
       animationFront(0.0f),
       lastFrameMillis(0),
+      effectSpeed(DEFAULT_EFFECT_SPEED),
       breathingStartMillis(0),
       breathingCycleMs(BREATHING_CYCLE_MS),
       breathingR(0),
@@ -57,6 +58,91 @@ LedMode LedController::getMode() const
 }
 
 // ============================================================
+// EFFECT SPEED
+// ============================================================
+
+void LedController::resetEffectSpeed()
+{
+    effectSpeed = DEFAULT_EFFECT_SPEED;
+
+    Serial.printf(
+        "[LED] EFFECT SPEED RESET: %u\n",
+        effectSpeed
+    );
+}
+
+void LedController::increaseEffectSpeed()
+{
+    if (
+        mode != LedMode::FLOW &&
+        mode != LedMode::BREATHING
+    )
+    {
+        Serial.println(
+            "[LED] SPEED_PLUS - brak aktywnego efektu."
+        );
+
+        return;
+    }
+
+    if (effectSpeed >= MAX_EFFECT_SPEED)
+    {
+        Serial.printf(
+            "[LED] EFFECT SPEED: MAX (%u)\n",
+            effectSpeed
+        );
+
+        return;
+    }
+
+    effectSpeed++;
+
+    Serial.printf(
+        "[LED] EFFECT SPEED: %u/%u\n",
+        effectSpeed,
+        MAX_EFFECT_SPEED
+    );
+}
+
+void LedController::decreaseEffectSpeed()
+{
+    if (
+        mode != LedMode::FLOW &&
+        mode != LedMode::BREATHING
+    )
+    {
+        Serial.println(
+            "[LED] SPEED_MINUS - brak aktywnego efektu."
+        );
+
+        return;
+    }
+
+    if (effectSpeed <= MIN_EFFECT_SPEED)
+    {
+        Serial.printf(
+            "[LED] EFFECT SPEED: MIN (%u)\n",
+            effectSpeed
+        );
+
+        return;
+    }
+
+    effectSpeed--;
+
+    Serial.printf(
+        "[LED] EFFECT SPEED: %u/%u\n",
+        effectSpeed,
+        MAX_EFFECT_SPEED
+    );
+}
+
+uint8_t LedController::getEffectSpeed() const
+{
+    return effectSpeed;
+}
+
+// ============================================================
 // CLEAR
 // ============================================================
 
@@ -65,6 +151,8 @@ void LedController::clear()
     mode = LedMode::OFF;
     animation = LedAnimation::NONE;
     animationFront = 0.0f;
+
+    resetEffectSpeed();
 
     strip.clear();
     strip.show();
@@ -127,6 +215,8 @@ void LedController::setStaticWhite()
 
     animationFront = 0.0f;
 
+    resetEffectSpeed();
+
     setAllWhite();
 
     Serial.println("[LED] MODE: STATIC WHITE");
@@ -138,6 +228,9 @@ void LedController::setStaticWhite()
 
 void LedController::startFlow()
 {
+    // Jeżeli FLOW jest już aktywny,
+    // nie uruchamiamy go ponownie.
+
     if (
         mode == LedMode::FLOW &&
         animation != LedAnimation::FLOW_OFF
@@ -152,6 +245,8 @@ void LedController::startFlow()
 
     if (animation == LedAnimation::FLOW_OFF)
     {
+        resetEffectSpeed();
+
         mode = LedMode::FLOW;
         animation = LedAnimation::FLOW_ON;
 
@@ -167,6 +262,8 @@ void LedController::startFlow()
     // --------------------------------------------------------
     // NEW FLOW
     // --------------------------------------------------------
+
+    resetEffectSpeed();
 
     mode = LedMode::FLOW;
     animation = LedAnimation::FLOW_ON;
@@ -189,10 +286,7 @@ void LedController::startBreathing(
     uint8_t w)
 {
     // Jeżeli BREATHING już działa z tym samym kolorem,
-    // nie restartujemy animacji.
-    //
-    // Chroni to przed resetowaniem cyklu przez powtarzane
-    // pakiety pilota GROUP_2_TOP oraz ON.
+    // nie restartujemy animacji ani prędkości.
 
     if (
         mode == LedMode::BREATHING &&
@@ -205,6 +299,8 @@ void LedController::startBreathing(
     {
         return;
     }
+
+    resetEffectSpeed();
 
     mode = LedMode::BREATHING;
     animation = LedAnimation::BREATHING;
@@ -246,6 +342,8 @@ void LedController::turnOff()
         if (animation == LedAnimation::FLOW_OFF)
             return;
 
+        resetEffectSpeed();
+
         animation = LedAnimation::FLOW_OFF;
 
         lastFrameMillis = millis() - FRAME_TIME;
@@ -272,6 +370,9 @@ void LedController::turnOff()
 
         return;
     }
+
+    // Jeżeli LED są już wyłączone, również resetujemy prędkość.
+    resetEffectSpeed();
 }
 
 // ============================================================

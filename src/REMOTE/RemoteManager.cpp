@@ -435,6 +435,26 @@ void RemoteManager::handleAction(RemoteAction action)
             {
                 led.turnOff();
             }
+            else
+            {
+                led.resetEffectSpeed();
+            }
+
+            break;
+
+        case RemoteAction::SPEED_PLUS:
+
+            Serial.println("[REMOTE] SPEED PLUS");
+
+            led.increaseEffectSpeed();
+
+            break;
+
+        case RemoteAction::SPEED_MINUS:
+
+            Serial.println("[REMOTE] SPEED MINUS");
+
+            led.decreaseEffectSpeed();
 
             break;
 

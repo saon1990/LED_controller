@@ -57,6 +57,16 @@ public:
     );
 
     // --------------------------------------------------------
+    // REGULACJA PRĘDKOŚCI EFEKTÓW
+    // --------------------------------------------------------
+
+    void increaseEffectSpeed();
+    void decreaseEffectSpeed();
+    void resetEffectSpeed();
+
+    uint8_t getEffectSpeed() const;
+
+    // --------------------------------------------------------
     // Przywracanie stanu
     // --------------------------------------------------------
 
@@ -85,6 +95,16 @@ private:
 
     float animationFront;
     unsigned long lastFrameMillis;
+
+    // --------------------------------------------------------
+    // WSPÓLNA PRĘDKOŚĆ EFEKTÓW
+    // --------------------------------------------------------
+
+    static constexpr uint8_t DEFAULT_EFFECT_SPEED = 5;
+    static constexpr uint8_t MIN_EFFECT_SPEED = 1;
+    static constexpr uint8_t MAX_EFFECT_SPEED = 10;
+
+    uint8_t effectSpeed;
 
     // --------------------------------------------------------
     // BREATHING
