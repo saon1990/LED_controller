@@ -1,238 +1,630 @@
-
 #include <Arduino.h>
-#include <SPI.h>
-#include "driver/gpio.h"
+#include <Wire.h>
+#include <WebServer.h>
+#include <WiFi.h>
 
-static constexpr int PIN_SCK  = 4;
-static constexpr int PIN_MOSI = 5;
-static constexpr int PIN_MISO = 6;
-static constexpr int PIN_CSN  = 7;
-static constexpr int PIN_GDO0 = 15;
+#include "config.h"
+#include "LED/LedController.h"
+#include "RTC/RtcManager.h"
+#include "STORAGE/EepromManager.h"
+#include "WEB/WebServerManager.h"
 
-static constexpr uint32_t SPI_FREQ = 1000000;
-static constexpr uint32_t CAPTURE_MS = 5000;
-static constexpr uint32_t ARM_DELAY_MS = 2000;
-static constexpr uint32_t MAX_EDGES = 4096;
-static constexpr uint32_t PRINT_LIMIT = 120;
+// ============================================================
+// GLOBAL OBJECTS
+// ============================================================
 
-SPISettings cc2500SPI(SPI_FREQ, MSBFIRST, SPI_MODE0);
+LedController led;
+RtcManager rtc;
+EepromManager storage;
+WebServerManager web;
 
-struct Edge {
-  uint32_t timeUs;
-  uint8_t level;
-};
+// ============================================================
+// FUNCTION DECLARATIONS
+// ============================================================
 
-static Edge edgeBuffer[MAX_EDGES];
+void setLedOn();
+void setLedOff();
+void setLedFlow();
 
-static volatile uint32_t edgeCount = 0;
-static volatile bool captureActive = false;
-static volatile bool bufferOverflow = false;
-static volatile uint32_t repeatedLevels = 0;
+bool saveCurrentState();
+void checkPowerLoss();
 
-static uint8_t lastLevel = 0;
-static portMUX_TYPE edgeMux = portMUX_INITIALIZER_UNLOCKED;
+unsigned long lastSaveMillis = 0;
 
-static void IRAM_ATTR gdo0ISR() {
-  const uint8_t level = (uint8_t)gpio_get_level((gpio_num_t)PIN_GDO0);
-  const uint32_t timestamp = micros();
+// ============================================================
+// LED ACTIONS
+// ============================================================
 
-  portENTER_CRITICAL_ISR(&edgeMux);
+// ============================================================
+// STATIC WHITE ON
+// ============================================================
 
-  if (captureActive) {
-    uint32_t idx = edgeCount;
+void setLedOn()
+{
+    // Regular ON does nothing if LED is already ON.
+    // This includes the FLOW mode.
 
-    if (idx < MAX_EDGES) {
-      edgeBuffer[idx].timeUs = timestamp;
-      edgeBuffer[idx].level = level;
-      edgeCount = idx + 1;
+    if (led.isOn())
+    {
+        Serial.println(
+            "[LED] ON - LED juz jest wlaczony."
+        );
 
-      if (idx > 0 && level == lastLevel) {
-        repeatedLevels++;
-      }
-      lastLevel = level;
-    } else {
-      bufferOverflow = true;
-    }
-  }
-
-  portEXIT_CRITICAL_ISR(&edgeMux);
-}
-
-static void ccSelect() {
-  SPI.beginTransaction(cc2500SPI);
-  digitalWrite(PIN_CSN, LOW);
-  delayMicroseconds(1);
-}
-
-static void ccDeselect() {
-  digitalWrite(PIN_CSN, HIGH);
-  SPI.endTransaction();
-}
-
-static uint8_t ccReadStatus(uint8_t addr) {
-  ccSelect();
-  SPI.transfer(addr | 0xC0);
-  uint8_t value = SPI.transfer(0x00);
-  ccDeselect();
-  return value;
-}
-
-static void ccWriteReg(uint8_t addr, uint8_t value) {
-  ccSelect();
-  SPI.transfer(addr);
-  SPI.transfer(value);
-  ccDeselect();
-}
-
-static void ccStrobe(uint8_t command) {
-  ccSelect();
-  SPI.transfer(command);
-  ccDeselect();
-}
-
-static void configureCC2500() {
-  digitalWrite(PIN_CSN, HIGH);
-  delay(1);
-
-  ccSelect();
-  ccDeselect();
-  delayMicroseconds(5);
-
-  ccSelect();
-  SPI.transfer(0x30);  // SRES
-  ccDeselect();
-  delay(5);
-
-  // Frequency word: 2472.750 MHz, 26 MHz crystal
-  ccWriteReg(0x0D, 0x5F);  // FREQ2
-  ccWriteReg(0x0E, 0x1B);  // FREQ1
-  ccWriteReg(0x0F, 0x14);  // FREQ0
-
-  // Preserve the asynchronous capture configuration
-  ccWriteReg(0x02, 0x0D);  // IOCFG0: async serial data
-  ccWriteReg(0x08, 0x30);  // PKTCTRL0: async serial mode
-  ccWriteReg(0x10, 0x03);  // MDMCFG4
-  ccWriteReg(0x11, 0x43);  // MDMCFG3
-  ccWriteReg(0x12, 0x00);  // MDMCFG2
-
-  // Other previously used receiver settings
-  ccWriteReg(0x00, 0x06);  // IOCFG2
-  ccWriteReg(0x01, 0x2E);  // IOCFG1
-  ccWriteReg(0x03, 0x47);  // FIFOTHR
-  ccWriteReg(0x04, 0xD3);  // SYNC1
-  ccWriteReg(0x05, 0x91);  // SYNC0
-  ccWriteReg(0x06, 0xFF);  // PKTLEN
-  ccWriteReg(0x07, 0x04);  // PKTCTRL1
-  ccWriteReg(0x09, 0x00);  // ADDR
-  ccWriteReg(0x0A, 0x00);  // CHANNR
-  ccWriteReg(0x13, 0x22);  // MDMCFG1
-  ccWriteReg(0x14, 0xF8);  // MDMCFG0
-  ccWriteReg(0x15, 0x15);  // DEVIATN
-  ccWriteReg(0x18, 0x18);  // MCSM0
-  ccWriteReg(0x19, 0x16);  // FOCCFG
-  ccWriteReg(0x1A, 0x6C);  // BSCFG
-  ccWriteReg(0x1B, 0x03);  // AGCCTRL2
-  ccWriteReg(0x1C, 0x40);  // AGCCTRL1
-  ccWriteReg(0x1D, 0x91);  // AGCCTRL0
-  ccWriteReg(0x21, 0x56);  // FREND1
-  ccWriteReg(0x22, 0x10);  // FREND0
-  ccWriteReg(0x23, 0xE9);  // FSCAL3
-  ccWriteReg(0x24, 0x2A);  // FSCAL2
-  ccWriteReg(0x25, 0x00);  // FSCAL1
-  ccWriteReg(0x26, 0x1F);  // FSCAL0
-  ccWriteReg(0x29, 0x59);  // FSTEST
-  ccWriteReg(0x2C, 0x88);  // TEST2
-  ccWriteReg(0x2D, 0x31);  // TEST1
-  ccWriteReg(0x2E, 0x0B);  // TEST0
-
-  ccStrobe(0x33);  // SCAL
-  delay(2);
-  ccStrobe(0x34);  // SRX
-  delay(2);
-}
-
-static void captureEdges() {
-  portENTER_CRITICAL(&edgeMux);
-  edgeCount = 0;
-  repeatedLevels = 0;
-  bufferOverflow = false;
-  lastLevel = (uint8_t)gpio_get_level((gpio_num_t)PIN_GDO0);
-  captureActive = true;
-  portEXIT_CRITICAL(&edgeMux);
-
-  Serial.println("\nCAPTURE STARTED: press the selected button once.");
-  delay(CAPTURE_MS);
-
-  portENTER_CRITICAL(&edgeMux);
-  captureActive = false;
-  const uint32_t count = edgeCount;
-  const uint32_t repeats = repeatedLevels;
-  const bool overflow = bufferOverflow;
-  portEXIT_CRITICAL(&edgeMux);
-
-  Serial.println("\n--- SUMMARY ---");
-  Serial.printf("Edges: %lu\n", count);
-  Serial.printf("Repeated consecutive levels: %lu\n", repeats);
-  Serial.printf("Buffer overflow: %s\n", overflow ? "YES" : "NO");
-
-  Serial.println("\n--- FIRST EDGE INTERVALS ---");
-  Serial.println("index,level,delta_us");
-
-  uint32_t previousTime = 0;
-  const uint32_t toPrint = (count < PRINT_LIMIT) ? count : PRINT_LIMIT;
-
-  for (uint32_t i = 0; i < toPrint; i++) {
-    const uint32_t timestamp = edgeBuffer[i].timeUs;
-    const uint32_t delta =
-        (i == 0) ? 0 : (uint32_t)(timestamp - previousTime);
-
-    Serial.printf("%lu,%u,%lu\n",
-                  i, edgeBuffer[i].level, delta);
-
-    previousTime = timestamp;
-  }
-
-  if (count > PRINT_LIMIT) {
-    Serial.printf("Output limited to %lu of %lu edges.\n",
-                  PRINT_LIMIT, count);
-  }
-
-  Serial.println("--- END ---");
-}
-
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  pinMode(PIN_CSN, OUTPUT);
-  digitalWrite(PIN_CSN, HIGH);
-
-  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CSN);
-  pinMode(PIN_GDO0, INPUT);
-
-  Serial.println("\nCC2500 capture test");
-
-  configureCC2500();
-
-  Serial.printf("PARTNUM=0x%02X VERSION=0x%02X\n",
-                ccReadStatus(0x30), ccReadStatus(0x31));
-
-  attachInterrupt(digitalPinToInterrupt(PIN_GDO0), gdo0ISR, CHANGE);
-
-  Serial.println("Ready. Press Enter to start a capture.");
-}
-
-void loop() {
-  if (Serial.available() > 0) {
-    while (Serial.available() > 0) {
-      Serial.read();
+        return;
     }
 
-    Serial.printf("Capture starts in %lu seconds...\n",
-                  ARM_DELAY_MS / 1000);
-    delay(ARM_DELAY_MS);
-    captureEdges();
+    Serial.println(
+        "[LED] ON - STATIC WHITE"
+    );
 
-    Serial.println("\nPress Enter for the next capture.");
-  }
+    led.turnOn();
+
+    if (!saveCurrentState())
+    {
+        Serial.println(
+            "[LED] UWAGA: nie zapisano trybu."
+        );
+    }
+}
+
+// ============================================================
+// FLOW ON
+// ============================================================
+
+void setLedFlow()
+{
+    if (
+        led.getMode() == LedMode::FLOW &&
+        led.getMode() != LedMode::OFF
+    )
+    {
+        Serial.println(
+            "[LED] FLOW - efekt juz jest aktywny."
+        );
+
+        return;
+    }
+
+    Serial.println(
+        "[LED] FLOW - START"
+    );
+
+    led.startFlow();
+
+    if (!saveCurrentState())
+    {
+        Serial.println(
+            "[LED] UWAGA: nie zapisano trybu FLOW."
+        );
+    }
+}
+
+// ============================================================
+// LED OFF
+// ============================================================
+
+void setLedOff()
+{
+    if (!led.isOn())
+    {
+        Serial.println(
+            "[LED] OFF - LED juz jest wylaczony."
+        );
+
+        return;
+    }
+
+    Serial.println(
+        "[LED] OFF - STOP"
+    );
+
+    led.turnOff();
+
+    // Zapisujemy OFF od razu po otrzymaniu polecenia.
+    // Jeżeli zasilanie zniknie podczas animacji wygaszania,
+    // po ponownym uruchomieniu LED ma pozostać OFF.
+
+    if (!saveCurrentState())
+    {
+        Serial.println(
+            "[LED] UWAGA: nie zapisano trybu OFF."
+        );
+    }
+}
+
+// ============================================================
+// SAVE CURRENT STATE
+// ============================================================
+
+bool saveCurrentState()
+{
+    RtcDateTime now;
+
+    if (!rtc.getDateTime(now))
+    {
+        Serial.println(
+            "[STORAGE] BLAD ODCZYTU RTC."
+        );
+
+        return false;
+    }
+
+    uint32_t timestamp = rtc.toTimestamp(now);
+
+    uint8_t mode =
+        static_cast<uint8_t>(led.getMode());
+
+    // --------------------------------------------------------
+    // SAVE TIMESTAMP
+    // --------------------------------------------------------
+
+    if (!storage.saveTimestamp(timestamp))
+    {
+        Serial.println(
+            "[STORAGE] BLAD ZAPISU TIMESTAMP."
+        );
+
+        return false;
+    }
+
+    // --------------------------------------------------------
+    // SAVE LED MODE
+    // --------------------------------------------------------
+
+    if (!storage.saveLedMode(mode))
+    {
+        Serial.println(
+            "[STORAGE] BLAD ZAPISU TRYBU LED."
+        );
+
+        return false;
+    }
+
+    Serial.printf(
+        "[STORAGE] Zapisano: "
+        "%04u-%02u-%02u %02u:%02u:%02u "
+        "| timestamp=%lu | mode=0x%02X\n",
+        now.year,
+        now.month,
+        now.day,
+        now.hour,
+        now.minute,
+        now.second,
+        timestamp,
+        mode
+    );
+
+    return true;
+}
+
+// ============================================================
+// POWER LOSS CHECK
+// ============================================================
+
+void checkPowerLoss()
+{
+    uint32_t savedTimestamp = 0;
+    uint8_t savedMode = 0xFF;
+
+    // --------------------------------------------------------
+    // LOAD TIMESTAMP
+    // --------------------------------------------------------
+
+    if (!storage.loadTimestamp(savedTimestamp))
+    {
+        Serial.println(
+            "[POWER] BLAD ODCZYTU TIMESTAMP."
+        );
+
+        Serial.println(
+            "[POWER] LED -> OFF"
+        );
+
+        led.restoreMode(LedMode::OFF);
+
+        saveCurrentState();
+
+        return;
+    }
+
+    if (
+        savedTimestamp == 0 ||
+        savedTimestamp == 0xFFFFFFFF
+    )
+    {
+        Serial.println(
+            "[POWER] BRAK POPRAWNEGO TIMESTAMP."
+        );
+
+        Serial.println(
+            "[POWER] LED -> OFF"
+        );
+
+        led.restoreMode(LedMode::OFF);
+
+        saveCurrentState();
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // LOAD LED MODE
+    // --------------------------------------------------------
+
+    bool modeValid =
+        storage.loadLedMode(savedMode);
+
+    // --------------------------------------------------------
+    // READ RTC
+    // --------------------------------------------------------
+
+    RtcDateTime now;
+
+    if (!rtc.getDateTime(now))
+    {
+        Serial.println(
+            "[POWER] BLAD ODCZYTU DS3231."
+        );
+
+        Serial.println(
+            "[POWER] LED -> OFF"
+        );
+
+        led.restoreMode(LedMode::OFF);
+
+        return;
+    }
+
+    uint32_t currentTimestamp =
+        rtc.toTimestamp(now);
+
+    // --------------------------------------------------------
+    // DIAGNOSTICS
+    // --------------------------------------------------------
+
+    Serial.println();
+
+    Serial.println(
+        "========================================"
+    );
+
+    Serial.println(
+        "             POWER LOSS CHECK"
+    );
+
+    Serial.println(
+        "========================================"
+    );
+
+    Serial.printf(
+        "Aktualny RTC:       "
+        "%04u-%02u-%02u %02u:%02u:%02u\n",
+        now.year,
+        now.month,
+        now.day,
+        now.hour,
+        now.minute,
+        now.second
+    );
+
+    Serial.printf(
+        "Aktualny timestamp: %lu\n",
+        currentTimestamp
+    );
+
+    Serial.printf(
+        "Zapisany timestamp: %lu\n",
+        savedTimestamp
+    );
+
+    if (modeValid)
+    {
+        Serial.printf(
+            "Zapisany tryb LED: 0x%02X\n",
+            savedMode
+        );
+    }
+    else
+    {
+        Serial.println(
+            "Zapisany tryb LED: BRAK / BLAD"
+        );
+    }
+
+    // --------------------------------------------------------
+    // TIMESTAMP VALIDATION
+    // --------------------------------------------------------
+
+    if (currentTimestamp < savedTimestamp)
+    {
+        Serial.println(
+            "[POWER] BLAD: RTC jest wczesniejszy "
+            "niz zapisany timestamp."
+        );
+
+        Serial.println(
+            "[POWER] LED -> OFF"
+        );
+
+        led.restoreMode(LedMode::OFF);
+
+        saveCurrentState();
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // OUTAGE DURATION
+    // --------------------------------------------------------
+
+    uint32_t difference =
+        currentTimestamp - savedTimestamp;
+
+    Serial.printf(
+        "Czas od ostatniego heartbeat: %lu s\n",
+        difference
+    );
+
+    // --------------------------------------------------------
+    // LONG OUTAGE
+    // --------------------------------------------------------
+
+    if (difference >= LONG_OUTAGE)
+    {
+        Serial.println(
+            "[POWER] DLUGI ZANIK ZASILANIA."
+        );
+
+        Serial.printf(
+            "[POWER] Prog: %lu s\n",
+            LONG_OUTAGE
+        );
+
+        led.restoreMode(LedMode::OFF);
+
+        Serial.println(
+            "[POWER] LED -> OFF"
+        );
+
+        // Zapisujemy OFF i aktualny timestamp.
+        // Dzięki temu następny restart nie przywróci
+        // poprzedniego trybu.
+
+        saveCurrentState();
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // SHORT OUTAGE
+    // --------------------------------------------------------
+
+    Serial.println(
+        "[POWER] KROTKI ZANIK ZASILANIA."
+    );
+
+    if (!modeValid)
+    {
+        Serial.println(
+            "[POWER] Niepoprawny zapis trybu LED."
+        );
+
+        Serial.println(
+            "[POWER] LED -> OFF"
+        );
+
+        led.restoreMode(LedMode::OFF);
+
+        saveCurrentState();
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // RESTORE MODE
+    // --------------------------------------------------------
+
+    switch (static_cast<LedMode>(savedMode))
+    {
+        case LedMode::OFF:
+
+            Serial.println(
+                "[POWER] Przywracam OFF."
+            );
+
+            led.restoreMode(LedMode::OFF);
+
+            break;
+
+        case LedMode::STATIC_WHITE:
+
+            Serial.println(
+                "[POWER] Przywracam STATIC WHITE."
+            );
+
+            led.restoreMode(LedMode::STATIC_WHITE);
+
+            break;
+
+        case LedMode::FLOW:
+
+            Serial.println(
+                "[POWER] Przywracam FLOW od poczatku."
+            );
+
+            led.restoreMode(LedMode::FLOW);
+
+            break;
+
+        default:
+
+            Serial.println(
+                "[POWER] Nieznany tryb LED."
+            );
+
+            Serial.println(
+                "[POWER] LED -> OFF"
+            );
+
+            led.restoreMode(LedMode::OFF);
+
+            saveCurrentState();
+
+            break;
+    }
+
+    Serial.println(
+        "========================================"
+    );
+
+    Serial.println();
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    delay(1000);
+
+    // --------------------------------------------------------
+    // LED INIT
+    // --------------------------------------------------------
+
+    led.begin();
+
+    // --------------------------------------------------------
+    // I2C INIT
+    // --------------------------------------------------------
+
+    Wire.begin(
+        I2C_SDA,
+        I2C_SCL
+    );
+
+    Serial.println();
+
+    Serial.println(
+        "========================================"
+    );
+
+    Serial.println(
+        "       LED CONTROLLER - START"
+    );
+
+    Serial.println(
+        "========================================"
+    );
+
+    // --------------------------------------------------------
+    // RTC INIT
+    // --------------------------------------------------------
+
+    bool rtcReady = rtc.begin();
+
+    // --------------------------------------------------------
+    // EEPROM INIT
+    // --------------------------------------------------------
+
+    bool storageReady = storage.begin();
+
+    // --------------------------------------------------------
+    // POWER LOSS CHECK
+    // --------------------------------------------------------
+
+    if (rtcReady && storageReady)
+    {
+        checkPowerLoss();
+    }
+    else
+    {
+        Serial.println(
+            "[START] RTC lub EEPROM niedostepne."
+        );
+
+        Serial.println(
+            "[START] LED -> OFF"
+        );
+
+        led.restoreMode(LedMode::OFF);
+    }
+
+    // --------------------------------------------------------
+    // RESTORED MODE
+    // --------------------------------------------------------
+
+    Serial.printf(
+        "[START] Aktualny tryb LED: 0x%02X\n",
+        static_cast<uint8_t>(led.getMode())
+    );
+
+    // --------------------------------------------------------
+    // WEB SERVER
+    // --------------------------------------------------------
+
+    web.begin(
+        led,
+        setLedOn,
+        setLedOff
+    );
+
+    // --------------------------------------------------------
+    // HEARTBEAT INIT
+    // --------------------------------------------------------
+
+    lastSaveMillis = millis();
+
+    Serial.println();
+
+    Serial.println(
+        "Normalna praca uruchomiona."
+    );
+
+    Serial.printf(
+        "Heartbeat STORAGE: co %lu sekund.\n",
+        SAVE_INTERVAL
+    );
+
+    Serial.printf(
+        "Limit zaniku zasilania: %lu sekund.\n",
+        LONG_OUTAGE
+    );
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop()
+{
+    // --------------------------------------------------------
+    // LED ANIMATION
+    // --------------------------------------------------------
+
+    led.update();
+
+    // --------------------------------------------------------
+    // WEB SERVER
+    // --------------------------------------------------------
+
+    web.handleClient();
+
+    // --------------------------------------------------------
+    // HEARTBEAT
+    // --------------------------------------------------------
+
+    if (
+        millis() - lastSaveMillis >=
+        SAVE_INTERVAL * 1000UL
+    )
+    {
+        lastSaveMillis = millis();
+
+        saveCurrentState();
+    }
+
+    delay(2);
 }
