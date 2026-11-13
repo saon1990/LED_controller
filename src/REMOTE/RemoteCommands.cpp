@@ -1,3 +1,4 @@
+
 #include "RemoteCommands.h"
 
 namespace REMOTE {
@@ -23,24 +24,27 @@ static const RemoteCommand V_O_PLUS[]         = { CMD(0x07, 0x00, 0x00), CMD(0x0
 static const RemoteCommand V_SPEED_MINUS[]    = { CMD(0x01, 0x13, 0x00) };
 static const RemoteCommand V_SUN_BOTTOM[]     = { CMD(0x05, 0x32, 0x00), CMD(0x05, 0x3C, 0x00), CMD(0x05, 0x46, 0x00), CMD(0x05, 0x50, 0x00) };
 static const RemoteCommand V_SPEED_PLUS[]     = { CMD(0x01, 0x12, 0x00) };
-static const RemoteCommand V_G1_TOP[]         = { CMD(0x01, 0x01, 0x01) };
-static const RemoteCommand V_G1_BOTTOM[]      = { CMD(0x01, 0x0A, 0x01) };
-static const RemoteCommand V_G2_TOP[]         = { CMD(0x01, 0x02, 0x02) };
-static const RemoteCommand V_G2_BOTTOM[]      = { CMD(0x01, 0x0B, 0x02) };
-static const RemoteCommand V_G3_TOP[]         = { CMD(0x01, 0x03, 0x03) };
-static const RemoteCommand V_G3_BOTTOM[]      = { CMD(0x01, 0x0C, 0x03) };
-static const RemoteCommand V_G4_TOP[]         = { CMD(0x01, 0x04, 0x04) };
-static const RemoteCommand V_G4_BOTTOM[]      = { CMD(0x01, 0x0D, 0x04) };
 
-// Wheel values use the latest selected-color capture (Wklejony tekst(10).txt).
-// Multiple values are intentional: the touch wheel emits nearby hue positions.
+static const RemoteCommand V_G1_TOP[]         = { CMD(0x01, 0x01, 0x01) };
+static const RemoteCommand V_G1_BOTTOM[]      = { CMD(0x01, 0x0A, 0x00) };
+
+static const RemoteCommand V_G2_TOP[]         = { CMD(0x01, 0x02, 0x02) };
+static const RemoteCommand V_G2_BOTTOM[]      = { CMD(0x01, 0x0B, 0x00) };
+
+static const RemoteCommand V_G3_TOP[]         = { CMD(0x01, 0x03, 0x03) };
+static const RemoteCommand V_G3_BOTTOM[]      = { CMD(0x01, 0x0C, 0x00) };
+
+static const RemoteCommand V_G4_TOP[]         = { CMD(0x01, 0x04, 0x04) };
+static const RemoteCommand V_G4_BOTTOM[]      = { CMD(0x01, 0x0D, 0x00) };
+
+// Wheel values: captured color positions. Kept unchanged.
 static const RemoteCommand V_WHEEL_RED[]      = { CMD(0x02, 0x02, 0x00), CMD(0x02, 0xF6, 0x00) };
 static const RemoteCommand V_WHEEL_ORANGE[]   = { CMD(0x02, 0x15, 0x00), CMD(0x02, 0x19, 0x00), CMD(0x02, 0x20, 0x00) };
 static const RemoteCommand V_WHEEL_YELLOW[]   = { CMD(0x02, 0x25, 0x00), CMD(0x02, 0x27, 0x00), CMD(0x02, 0x2D, 0x00) };
 static const RemoteCommand V_WHEEL_GREEN[]    = { CMD(0x02, 0x48, 0x00), CMD(0x02, 0x4E, 0x00), CMD(0x02, 0x4F, 0x00) };
 static const RemoteCommand V_WHEEL_CYAN[]     = { CMD(0x02, 0x8E, 0x00), CMD(0x02, 0x91, 0x00), CMD(0x02, 0x93, 0x00) };
 static const RemoteCommand V_WHEEL_BLUE[]     = { CMD(0x02, 0xB2, 0x00), CMD(0x02, 0xB6, 0x00) };
-static const RemoteCommand V_WHEEL_PURPLE[]   = { CMD(0x02, 0xD5, 0x00), CMD(0x02, 0xDD, 0x00), CMD(0x02, 0xDE, 0x00) };
+static const RemoteCommand V_WHEEL_PINK[]     = { CMD(0x02, 0xD5, 0x00), CMD(0x02, 0xDD, 0x00), CMD(0x02, 0xDE, 0x00) };
 
 #undef CMD
 
@@ -72,7 +76,7 @@ static const CommandEntry ENTRIES[] = {
     ENTRY(WHEEL_GREEN, "WHEEL_GREEN", V_WHEEL_GREEN),
     ENTRY(WHEEL_CYAN, "WHEEL_CYAN", V_WHEEL_CYAN),
     ENTRY(WHEEL_BLUE, "WHEEL_BLUE", V_WHEEL_BLUE),
-    ENTRY(WHEEL_PURPLE, "WHEEL_PURPLE", V_WHEEL_PURPLE)
+    ENTRY(WHEEL_PINK, "WHEEL_PINK", V_WHEEL_PINK)
 };
 
 #undef ENTRY

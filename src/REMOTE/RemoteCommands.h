@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <stdint.h>
@@ -31,7 +32,7 @@ enum class RemoteAction : uint8_t {
     WHEEL_GREEN,
     WHEEL_CYAN,
     WHEEL_BLUE,
-    WHEEL_PURPLE
+    WHEEL_PINK
 };
 
 struct RemoteCommand {
