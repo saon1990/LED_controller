@@ -71,6 +71,86 @@ void LedController::resetEffectSpeed()
     );
 }
 
+uint8_t LedController::getEffectSpeed() const
+{
+    return effectSpeed;
+}
+
+// ============================================================
+// BREATHING CYCLE TIME
+// ============================================================
+
+uint32_t LedController::getBreathingCycleForSpeed() const
+{
+    // Czas pełnego cyklu w milisekundach.
+    // 50% rozjaśnianie + 50% ściemnianie.
+
+    static const uint32_t cycleTimes[10] =
+    {
+        12000,  // Speed 1
+        10000,  // Speed 2
+        8000,   // Speed 3
+        7000,   // Speed 4
+        6000,   // Speed 5
+        5000,   // Speed 6
+        4000,   // Speed 7
+        3000,   // Speed 8
+        2500,   // Speed 9
+        2000    // Speed 10
+    };
+
+    return cycleTimes[effectSpeed - 1];
+}
+
+// ============================================================
+// UPDATE BREATHING SPEED
+// ============================================================
+
+void LedController::updateBreathingSpeed()
+{
+    if (
+        animation != LedAnimation::BREATHING ||
+        breathingCycleMs == 0
+    )
+    {
+        return;
+    }
+
+    const unsigned long now = millis();
+
+    // Obliczamy aktualną fazę na podstawie starego cyklu.
+
+    const unsigned long elapsed =
+        now - breathingStartMillis;
+
+    const float phase =
+        static_cast<float>(elapsed % breathingCycleMs) /
+        static_cast<float>(breathingCycleMs);
+
+    const uint32_t newCycle =
+        getBreathingCycleForSpeed();
+
+    // Zachowujemy aktualną fazę animacji.
+    // Zmieniamy punkt startowy tak, aby jasność
+    // w chwili zmiany prędkości pozostała niezmieniona.
+
+    breathingStartMillis =
+        now - static_cast<unsigned long>(
+            phase * static_cast<float>(newCycle)
+        );
+
+    breathingCycleMs = newCycle;
+
+    Serial.printf(
+        "[LED] BREATHING CYCLE: %lu ms\n",
+        static_cast<unsigned long>(breathingCycleMs)
+    );
+}
+
+// ============================================================
+// INCREASE SPEED
+// ============================================================
+
 void LedController::increaseEffectSpeed()
 {
     if (
@@ -97,12 +177,21 @@ void LedController::increaseEffectSpeed()
 
     effectSpeed++;
 
+    // Aktualizujemy tempo wyłącznie dla BREATHING.
+    // FLOW na tym etapie pozostaje bez zmian.
+
+    updateBreathingSpeed();
+
     Serial.printf(
         "[LED] EFFECT SPEED: %u/%u\n",
         effectSpeed,
         MAX_EFFECT_SPEED
     );
 }
+
+// ============================================================
+// DECREASE SPEED
+// ============================================================
 
 void LedController::decreaseEffectSpeed()
 {
@@ -130,16 +219,16 @@ void LedController::decreaseEffectSpeed()
 
     effectSpeed--;
 
+    // Aktualizujemy tempo wyłącznie dla BREATHING.
+    // FLOW na tym etapie pozostaje bez zmian.
+
+    updateBreathingSpeed();
+
     Serial.printf(
         "[LED] EFFECT SPEED: %u/%u\n",
         effectSpeed,
         MAX_EFFECT_SPEED
     );
-}
-
-uint8_t LedController::getEffectSpeed() const
-{
-    return effectSpeed;
 }
 
 // ============================================================
@@ -310,12 +399,16 @@ void LedController::startBreathing(
     breathingB = b;
     breathingW = w;
 
-    breathingCycleMs = BREATHING_CYCLE_MS;
+    breathingCycleMs = getBreathingCycleForSpeed();
     breathingStartMillis = millis();
 
     lastFrameMillis = millis() - FRAME_TIME;
 
-    Serial.println("[LED] MODE: BREATHING - START");
+    Serial.printf(
+        "[LED] MODE: BREATHING - START | SPEED: %u | CYCLE: %lu ms\n",
+        effectSpeed,
+        static_cast<unsigned long>(breathingCycleMs)
+    );
 }
 
 // ============================================================

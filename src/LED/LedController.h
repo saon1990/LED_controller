@@ -118,6 +118,9 @@ private:
     uint8_t breathingB;
     uint8_t breathingW;
 
+    uint32_t getBreathingCycleForSpeed() const;
+    void updateBreathingSpeed();
+
     // --------------------------------------------------------
     // Funkcje pomocnicze
     // --------------------------------------------------------

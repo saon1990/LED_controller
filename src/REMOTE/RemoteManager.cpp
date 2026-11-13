@@ -29,6 +29,16 @@ constexpr uint8_t NRF_MOSI = 5;
 constexpr uint8_t NRF_CHANNEL = 10;
 constexpr uint8_t RX_LENGTH = 12;
 
+// ------------------------------------------------------------
+// SPEED BUTTON REPEAT FILTER
+// ------------------------------------------------------------
+
+constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS = 600;
+
+RemoteAction lastSpeedAction = RemoteAction::SPEED_MINUS;
+uint32_t lastSpeedPacketMillis = 0;
+bool speedActionSeen = false;
+
 static const RemoteAction ACTIONS[] = {
     RemoteAction::ON,
     RemoteAction::OFF,
@@ -50,6 +60,61 @@ static const RemoteAction ACTIONS[] = {
     RemoteAction::GROUP_4_TOP,
     RemoteAction::GROUP_4_BOTTOM
 };
+
+bool isSpeedAction(RemoteAction action)
+{
+    return (
+        action == RemoteAction::SPEED_PLUS ||
+        action == RemoteAction::SPEED_MINUS
+    );
+}
+
+bool shouldHandleSpeedAction(
+    RemoteAction action,
+    uint8_t command)
+{
+    if (!isSpeedAction(action))
+        return true;
+
+    const uint32_t now = millis();
+
+    // Bit 7 oznacza powtórzenie/przytrzymanie przycisku.
+    if (command & 0x80)
+    {
+        lastSpeedAction = action;
+        lastSpeedPacketMillis = now;
+        speedActionSeen = true;
+
+        Serial.println(
+            "[REMOTE] SPEED ACTION IGNORED - REPEAT FLAG"
+        );
+
+        return false;
+    }
+
+    // Kolejne pakiety tego samego przycisku traktujemy
+    // jako powtórzenia jednego fizycznego naciśnięcia.
+    if (
+        speedActionSeen &&
+        action == lastSpeedAction &&
+        now - lastSpeedPacketMillis < SPEED_REPEAT_TIMEOUT_MS
+    )
+    {
+        lastSpeedPacketMillis = now;
+
+        Serial.println(
+            "[REMOTE] SPEED ACTION IGNORED - DUPLICATE"
+        );
+
+        return false;
+    }
+
+    lastSpeedAction = action;
+    lastSpeedPacketMillis = now;
+    speedActionSeen = true;
+
+    return true;
+}
 
 uint8_t reverseBits(uint8_t value)
 {
@@ -392,6 +457,12 @@ bool RemoteManager::processPacket(const uint8_t* raw)
         "[REMOTE] ACTION: %s\n",
         getActionName(action)
     );
+
+    // Filtrujemy wyłącznie SPEED_PLUS i SPEED_MINUS.
+    // Pozostałe przyciski działają bez zmian.
+
+    if (!shouldHandleSpeedAction(action, command))
+        return true;
 
     handleAction(action);
 
