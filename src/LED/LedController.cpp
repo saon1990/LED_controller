@@ -1,3 +1,4 @@
+
 #include "LedController.h"
 #include "config.h"
 #include <math.h>
@@ -81,12 +82,27 @@ void LedController::setStaticWhite() {
     resetEffectSpeed(); setAllWhite(); Serial.println("[LED] MODE: STATIC WHITE");
 }
 void LedController::startFlow() {
-    if(mode==LedMode::FLOW && animation!=LedAnimation::FLOW_OFF) return;
+    // GROUP_1_TOP przywraca biel bez restartowania trwającego FLOW.
+    currentR=0; currentG=0; currentB=0; currentW=255;
+
+    // FLOW jest już aktywny - zachowujemy aktualną pozycję animacji.
+    if(mode==LedMode::FLOW && animation!=LedAnimation::FLOW_OFF) {
+        if(animation==LedAnimation::NONE) {
+            setAllWhite();
+        }
+        Serial.println("[LED] FLOW - WHITE RESTORED, POSITION PRESERVED");
+        return;
+    }
+
+    // Jeżeli trwa wygaszanie, odwracamy je od aktualnej pozycji.
     if(animation==LedAnimation::FLOW_OFF) {
         resetEffectSpeed(); mode=LedMode::FLOW; animation=LedAnimation::FLOW_ON;
         lastFrameMillis=millis()-FRAME_TIME;
-        Serial.println("[LED] FLOW - REVERSE FROM CURRENT POSITION"); return;
+        Serial.println("[LED] FLOW - REVERSE FROM CURRENT POSITION (WHITE)");
+        return;
     }
+
+    // Nowy start FLOW - od początku.
     resetEffectSpeed(); mode=LedMode::FLOW; animation=LedAnimation::FLOW_ON;
     animationFront=0; lastFrameMillis=millis()-FRAME_TIME;
     Serial.println("[LED] MODE: FLOW - START");
