@@ -1,13 +1,11 @@
+
 #include <Arduino.h>
 #include <Wire.h>
-#include <WebServer.h>
-#include <WiFi.h>
 
 #include "config.h"
 #include "LED/LedController.h"
 #include "RTC/RtcManager.h"
 #include "STORAGE/EepromManager.h"
-#include "WEB/WebServerManager.h"
 
 // ============================================================
 // GLOBAL OBJECTS
@@ -16,7 +14,6 @@
 LedController led;
 RtcManager rtc;
 EepromManager storage;
-WebServerManager web;
 
 // ============================================================
 // FUNCTION DECLARATIONS
@@ -28,6 +25,7 @@ void setLedFlow();
 
 bool saveCurrentState();
 void checkPowerLoss();
+void handleSerialCommands();
 
 unsigned long lastSaveMillis = 0;
 
@@ -41,21 +39,24 @@ unsigned long lastSaveMillis = 0;
 
 void setLedOn()
 {
-    // Regular ON does nothing if LED is already ON.
-    // This includes the FLOW mode.
+    // Jeżeli STATIC WHITE jest już aktywny,
+    // nie wykonujemy żadnej dodatkowej operacji.
 
-    if (led.isOn())
+    if (led.getMode() == LedMode::STATIC_WHITE)
     {
         Serial.println(
-            "[LED] ON - LED juz jest wlaczony."
+            "[LED] ON - STATIC WHITE juz aktywny."
         );
 
         return;
     }
 
     Serial.println(
-        "[LED] ON - STATIC WHITE"
+        "[LED] ON - NATYCHMIASTOWE STATIC WHITE"
     );
+
+    // Natychmiast przerywamy FLOW i zapalamy
+    // całą taśmę na biało.
 
     led.turnOn();
 
@@ -73,10 +74,7 @@ void setLedOn()
 
 void setLedFlow()
 {
-    if (
-        led.getMode() == LedMode::FLOW &&
-        led.getMode() != LedMode::OFF
-    )
+    if (led.getMode() == LedMode::FLOW)
     {
         Serial.println(
             "[LED] FLOW - efekt juz jest aktywny."
@@ -129,6 +127,69 @@ void setLedOff()
         Serial.println(
             "[LED] UWAGA: nie zapisano trybu OFF."
         );
+    }
+}
+
+// ============================================================
+// SERIAL COMMAND HANDLER
+// ============================================================
+
+void handleSerialCommands()
+{
+    while (Serial.available() > 0)
+    {
+        char command = Serial.read();
+
+        // Ignorujemy znaki końca linii.
+
+        if (command == '\r' || command == '\n')
+            continue;
+
+        Serial.printf(
+            "[SERIAL] Otrzymano komende: %c\n",
+            command
+        );
+
+        switch (command)
+        {
+            case '1':
+
+                setLedOn();
+
+                break;
+
+            case '2':
+
+                setLedFlow();
+
+                break;
+
+            case '0':
+
+                setLedOff();
+
+                break;
+
+            default:
+
+                Serial.println(
+                    "[SERIAL] Nieznana komenda."
+                );
+
+                Serial.println(
+                    "1 = STATIC WHITE"
+                );
+
+                Serial.println(
+                    "2 = FLOW"
+                );
+
+                Serial.println(
+                    "0 = OFF"
+                );
+
+                break;
+        }
     }
 }
 
@@ -562,16 +623,6 @@ void setup()
     );
 
     // --------------------------------------------------------
-    // WEB SERVER
-    // --------------------------------------------------------
-
-    web.begin(
-        led,
-        setLedOn,
-        setLedOff
-    );
-
-    // --------------------------------------------------------
     // HEARTBEAT INIT
     // --------------------------------------------------------
 
@@ -592,6 +643,24 @@ void setup()
         "Limit zaniku zasilania: %lu sekund.\n",
         LONG_OUTAGE
     );
+
+    Serial.println();
+
+    Serial.println(
+        "STEROWANIE SERIAL:"
+    );
+
+    Serial.println(
+        "1 = STATIC WHITE"
+    );
+
+    Serial.println(
+        "2 = FLOW"
+    );
+
+    Serial.println(
+        "0 = OFF"
+    );
 }
 
 // ============================================================
@@ -601,16 +670,16 @@ void setup()
 void loop()
 {
     // --------------------------------------------------------
+    // SERIAL COMMANDS
+    // --------------------------------------------------------
+
+    handleSerialCommands();
+
+    // --------------------------------------------------------
     // LED ANIMATION
     // --------------------------------------------------------
 
     led.update();
-
-    // --------------------------------------------------------
-    // WEB SERVER
-    // --------------------------------------------------------
-
-    web.handleClient();
 
     // --------------------------------------------------------
     // HEARTBEAT

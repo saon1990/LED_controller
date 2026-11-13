@@ -1,3 +1,4 @@
+
 #include "LedController.h"
 #include "config.h"
 
@@ -129,8 +130,8 @@ void LedController::setStaticWhite()
 
 void LedController::startFlow()
 {
-    // Jeżeli FLOW już działa lub został zakończony,
-    // nie uruchamiamy go ponownie bez potrzeby.
+    // Jeżeli FLOW jest już aktywny,
+    // nie uruchamiamy go ponownie.
 
     if (
         mode == LedMode::FLOW &&
@@ -140,13 +141,38 @@ void LedController::startFlow()
         return;
     }
 
+    // --------------------------------------------------------
+    // REVERSE FLOW OFF
+    // --------------------------------------------------------
+
+    // Jeżeli trwa wygaszanie FLOW_OFF,
+    // odwracamy kierunek animacji bez resetowania pozycji.
+
+    if (animation == LedAnimation::FLOW_OFF)
+    {
+        mode = LedMode::FLOW;
+        animation = LedAnimation::FLOW_ON;
+
+        lastFrameMillis = millis() - FRAME_TIME;
+
+        Serial.println(
+            "[LED] FLOW - REVERSE FROM CURRENT POSITION"
+        );
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // NEW FLOW
+    // --------------------------------------------------------
+
+    // Jeżeli poprzednia animacja została zakończona
+    // lub taśma jest wyłączona, rozpoczynamy od początku.
+
     mode = LedMode::FLOW;
     animation = LedAnimation::FLOW_ON;
 
     animationFront = 0.0f;
-
-    // Umożliwia wykonanie pierwszej klatki
-    // podczas najbliższego wywołania update().
 
     lastFrameMillis = millis() - FRAME_TIME;
 
@@ -169,7 +195,8 @@ void LedController::turnOn()
 void LedController::turnOff()
 {
     // Jeżeli FLOW jest aktywny,
-    // wykonujemy animację wygaszania.
+    // rozpoczynamy wygaszanie od aktualnego położenia
+    // frontu animacji.
 
     if (mode == LedMode::FLOW)
     {
@@ -178,7 +205,8 @@ void LedController::turnOff()
 
         animation = LedAnimation::FLOW_OFF;
 
-        animationFront = LED_COUNT - 1;
+        // Zachowujemy aktualną pozycję animationFront.
+        // Nie zapalamy ponownie całej taśmy.
 
         lastFrameMillis = millis() - FRAME_TIME;
 
