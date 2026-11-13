@@ -7,19 +7,15 @@ class EepromManager
 public:
     bool begin();
 
-    // --------------------------------------------------------
-    // TIMESTAMP
-    // --------------------------------------------------------
-
     bool saveTimestamp(uint32_t timestamp);
     bool loadTimestamp(uint32_t& timestamp);
 
-    // --------------------------------------------------------
-    // LED MODE
-    // --------------------------------------------------------
-
     bool saveLedMode(uint8_t mode);
     bool loadLedMode(uint8_t& mode);
+
+    // Ostatni aktywny tryb, niezależny od aktualnego OFF.
+    bool saveLastActiveLedMode(uint8_t mode);
+    bool loadLastActiveLedMode(uint8_t& mode);
 
 private:
     bool writeBytes(

@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <stdint.h>
@@ -10,6 +9,7 @@ enum class RemoteAction : uint8_t {
     ON,
     OFF,
     COLOR_CYCLE,
+    COLOR_CONTROL,
     SUN_TOP,
     MODE,
     O_MINUS,
@@ -18,6 +18,7 @@ enum class RemoteAction : uint8_t {
     SPEED_MINUS,
     SUN_BOTTOM,
     SPEED_PLUS,
+
     GROUP_1_TOP,
     GROUP_1_BOTTOM,
     GROUP_2_TOP,
@@ -26,6 +27,7 @@ enum class RemoteAction : uint8_t {
     GROUP_3_BOTTOM,
     GROUP_4_TOP,
     GROUP_4_BOTTOM,
+
     WHEEL_RED,
     WHEEL_ORANGE,
     WHEEL_YELLOW,
@@ -44,11 +46,24 @@ struct RemoteCommand {
 // Returns the number of captured variants for an action.
 uint8_t getCommandVariantCount(RemoteAction action);
 
-// Copies one variant into outCommand. Returns false for an invalid action/index
-// or a null output pointer.
-bool getCommandVariant(RemoteAction action,
-                       uint8_t variantIndex,
-                       RemoteCommand* outCommand);
+// Copies one variant into outCommand.
+// Returns false for an invalid action/index or a null output pointer.
+bool getCommandVariant(
+    RemoteAction action,
+    uint8_t variantIndex,
+    RemoteCommand* outCommand
+);
+
+// Identifies a received command.
+// Bit 7 of command is ignored because it is the held/repeat flag.
+// COMMAND 0x02 is classified as COLOR_CONTROL because its argument
+// alone cannot reliably distinguish COLOR CYCLE from wheel movement.
+bool identifyCommand(
+    uint8_t command,
+    uint8_t argument,
+    uint8_t group,
+    RemoteAction* outAction
+);
 
 // Human-readable action name, useful for Serial diagnostics.
 const char* getActionName(RemoteAction action);

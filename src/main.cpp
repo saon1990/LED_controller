@@ -1,11 +1,12 @@
-
 #include <Arduino.h>
 #include <Wire.h>
 
 #include "config.h"
+
 #include "LED/LedController.h"
 #include "RTC/RtcManager.h"
 #include "STORAGE/EepromManager.h"
+#include "REMOTE/RemoteManager.h"
 
 // ============================================================
 // GLOBAL OBJECTS
@@ -14,6 +15,8 @@
 LedController led;
 RtcManager rtc;
 EepromManager storage;
+
+REMOTE::RemoteManager remote;
 
 // ============================================================
 // FUNCTION DECLARATIONS
@@ -25,38 +28,53 @@ void setLedFlow();
 
 bool saveCurrentState();
 void checkPowerLoss();
+
 void handleSerialCommands();
+void handleRemoteCommands();
+
+bool saveLastActiveMode(uint8_t mode);
 
 unsigned long lastSaveMillis = 0;
 
 // ============================================================
-// LED ACTIONS
+// SAVE LAST ACTIVE MODE
 // ============================================================
 
+bool saveLastActiveMode(uint8_t mode)
+{
+    if (
+        mode != static_cast<uint8_t>(LedMode::STATIC_WHITE) &&
+        mode != static_cast<uint8_t>(LedMode::FLOW)
+    )
+    {
+        return false;
+    }
+
+    return storage.saveLastActiveLedMode(mode);
+}
+
 // ============================================================
-// STATIC WHITE ON
+// STATIC WHITE
 // ============================================================
 
 void setLedOn()
 {
-    // Jeżeli STATIC WHITE jest już aktywny,
-    // nie wykonujemy żadnej dodatkowej operacji.
+    saveLastActiveMode(
+        static_cast<uint8_t>(LedMode::STATIC_WHITE)
+    );
 
     if (led.getMode() == LedMode::STATIC_WHITE)
     {
         Serial.println(
-            "[LED] ON - STATIC WHITE juz aktywny."
+            "[LED] STATIC WHITE juz aktywny."
         );
 
         return;
     }
 
     Serial.println(
-        "[LED] ON - NATYCHMIASTOWE STATIC WHITE"
+        "[LED] ON - STATIC WHITE"
     );
-
-    // Natychmiast przerywamy FLOW i zapalamy
-    // całą taśmę na biało.
 
     led.turnOn();
 
@@ -69,11 +87,15 @@ void setLedOn()
 }
 
 // ============================================================
-// FLOW ON
+// FLOW
 // ============================================================
 
 void setLedFlow()
 {
+    saveLastActiveMode(
+        static_cast<uint8_t>(LedMode::FLOW)
+    );
+
     if (led.getMode() == LedMode::FLOW)
     {
         Serial.println(
@@ -98,7 +120,7 @@ void setLedFlow()
 }
 
 // ============================================================
-// LED OFF
+// OFF
 // ============================================================
 
 void setLedOff()
@@ -116,11 +138,10 @@ void setLedOff()
         "[LED] OFF - STOP"
     );
 
-    led.turnOff();
+    // Nie nadpisujemy ostatniego aktywnego trybu.
+    // LedController sam obsługuje FLOW_OFF.
 
-    // Zapisujemy OFF od razu po otrzymaniu polecenia.
-    // Jeżeli zasilanie zniknie podczas animacji wygaszania,
-    // po ponownym uruchomieniu LED ma pozostać OFF.
+    led.turnOff();
 
     if (!saveCurrentState())
     {
@@ -131,7 +152,7 @@ void setLedOff()
 }
 
 // ============================================================
-// SERIAL COMMAND HANDLER
+// SERIAL COMMANDS
 // ============================================================
 
 void handleSerialCommands()
@@ -139,8 +160,6 @@ void handleSerialCommands()
     while (Serial.available() > 0)
     {
         char command = Serial.read();
-
-        // Ignorujemy znaki końca linii.
 
         if (command == '\r' || command == '\n')
             continue;
@@ -153,44 +172,34 @@ void handleSerialCommands()
         switch (command)
         {
             case '1':
-
                 setLedOn();
-
                 break;
 
             case '2':
-
                 setLedFlow();
-
                 break;
 
             case '0':
-
                 setLedOff();
-
                 break;
 
             default:
-
-                Serial.println(
-                    "[SERIAL] Nieznana komenda."
-                );
-
-                Serial.println(
-                    "1 = STATIC WHITE"
-                );
-
-                Serial.println(
-                    "2 = FLOW"
-                );
-
-                Serial.println(
-                    "0 = OFF"
-                );
-
+                Serial.println("[SERIAL] Nieznana komenda.");
+                Serial.println("1 = STATIC WHITE");
+                Serial.println("2 = FLOW");
+                Serial.println("0 = OFF");
                 break;
         }
     }
+}
+
+// ============================================================
+// REMOTE COMMANDS
+// ============================================================
+
+void handleRemoteCommands()
+{
+    remote.update();
 }
 
 // ============================================================
@@ -215,10 +224,6 @@ bool saveCurrentState()
     uint8_t mode =
         static_cast<uint8_t>(led.getMode());
 
-    // --------------------------------------------------------
-    // SAVE TIMESTAMP
-    // --------------------------------------------------------
-
     if (!storage.saveTimestamp(timestamp))
     {
         Serial.println(
@@ -227,10 +232,6 @@ bool saveCurrentState()
 
         return false;
     }
-
-    // --------------------------------------------------------
-    // SAVE LED MODE
-    // --------------------------------------------------------
 
     if (!storage.saveLedMode(mode))
     {
@@ -267,19 +268,10 @@ void checkPowerLoss()
     uint32_t savedTimestamp = 0;
     uint8_t savedMode = 0xFF;
 
-    // --------------------------------------------------------
-    // LOAD TIMESTAMP
-    // --------------------------------------------------------
-
     if (!storage.loadTimestamp(savedTimestamp))
     {
-        Serial.println(
-            "[POWER] BLAD ODCZYTU TIMESTAMP."
-        );
-
-        Serial.println(
-            "[POWER] LED -> OFF"
-        );
+        Serial.println("[POWER] BLAD ODCZYTU TIMESTAMP.");
+        Serial.println("[POWER] LED -> OFF");
 
         led.restoreMode(LedMode::OFF);
 
@@ -293,13 +285,8 @@ void checkPowerLoss()
         savedTimestamp == 0xFFFFFFFF
     )
     {
-        Serial.println(
-            "[POWER] BRAK POPRAWNEGO TIMESTAMP."
-        );
-
-        Serial.println(
-            "[POWER] LED -> OFF"
-        );
+        Serial.println("[POWER] BRAK POPRAWNEGO TIMESTAMP.");
+        Serial.println("[POWER] LED -> OFF");
 
         led.restoreMode(LedMode::OFF);
 
@@ -308,28 +295,41 @@ void checkPowerLoss()
         return;
     }
 
-    // --------------------------------------------------------
-    // LOAD LED MODE
-    // --------------------------------------------------------
-
     bool modeValid =
         storage.loadLedMode(savedMode);
 
     // --------------------------------------------------------
-    // READ RTC
+    // MIGRACJA STAREGO ZAPISU
     // --------------------------------------------------------
+
+    // Jeśli nowy zapis ostatniego aktywnego trybu jeszcze
+    // nie istnieje, a stary zapis wskazuje aktywny tryb,
+    // wykorzystujemy go do inicjalizacji nowej komórki.
+
+    uint8_t lastActiveMode = 0xFF;
+
+    if (!storage.loadLastActiveLedMode(lastActiveMode))
+    {
+        if (
+            modeValid &&
+            (
+                savedMode ==
+                    static_cast<uint8_t>(LedMode::STATIC_WHITE) ||
+                savedMode ==
+                    static_cast<uint8_t>(LedMode::FLOW)
+            )
+        )
+        {
+            storage.saveLastActiveLedMode(savedMode);
+        }
+    }
 
     RtcDateTime now;
 
     if (!rtc.getDateTime(now))
     {
-        Serial.println(
-            "[POWER] BLAD ODCZYTU DS3231."
-        );
-
-        Serial.println(
-            "[POWER] LED -> OFF"
-        );
+        Serial.println("[POWER] BLAD ODCZYTU DS3231.");
+        Serial.println("[POWER] LED -> OFF");
 
         led.restoreMode(LedMode::OFF);
 
@@ -339,23 +339,10 @@ void checkPowerLoss()
     uint32_t currentTimestamp =
         rtc.toTimestamp(now);
 
-    // --------------------------------------------------------
-    // DIAGNOSTICS
-    // --------------------------------------------------------
-
     Serial.println();
-
-    Serial.println(
-        "========================================"
-    );
-
-    Serial.println(
-        "             POWER LOSS CHECK"
-    );
-
-    Serial.println(
-        "========================================"
-    );
+    Serial.println("========================================");
+    Serial.println("             POWER LOSS CHECK");
+    Serial.println("========================================");
 
     Serial.printf(
         "Aktualny RTC:       "
@@ -392,10 +379,6 @@ void checkPowerLoss()
         );
     }
 
-    // --------------------------------------------------------
-    // TIMESTAMP VALIDATION
-    // --------------------------------------------------------
-
     if (currentTimestamp < savedTimestamp)
     {
         Serial.println(
@@ -403,9 +386,7 @@ void checkPowerLoss()
             "niz zapisany timestamp."
         );
 
-        Serial.println(
-            "[POWER] LED -> OFF"
-        );
+        Serial.println("[POWER] LED -> OFF");
 
         led.restoreMode(LedMode::OFF);
 
@@ -413,10 +394,6 @@ void checkPowerLoss()
 
         return;
     }
-
-    // --------------------------------------------------------
-    // OUTAGE DURATION
-    // --------------------------------------------------------
 
     uint32_t difference =
         currentTimestamp - savedTimestamp;
@@ -443,13 +420,9 @@ void checkPowerLoss()
 
         led.restoreMode(LedMode::OFF);
 
-        Serial.println(
-            "[POWER] LED -> OFF"
-        );
+        Serial.println("[POWER] LED -> OFF");
 
-        // Zapisujemy OFF i aktualny timestamp.
-        // Dzięki temu następny restart nie przywróci
-        // poprzedniego trybu.
+        // Ostatni aktywny tryb pozostaje zachowany.
 
         saveCurrentState();
 
@@ -470,9 +443,7 @@ void checkPowerLoss()
             "[POWER] Niepoprawny zapis trybu LED."
         );
 
-        Serial.println(
-            "[POWER] LED -> OFF"
-        );
+        Serial.println("[POWER] LED -> OFF");
 
         led.restoreMode(LedMode::OFF);
 
@@ -482,16 +453,14 @@ void checkPowerLoss()
     }
 
     // --------------------------------------------------------
-    // RESTORE MODE
+    // RESTORE CURRENT STATE
     // --------------------------------------------------------
 
     switch (static_cast<LedMode>(savedMode))
     {
         case LedMode::OFF:
 
-            Serial.println(
-                "[POWER] Przywracam OFF."
-            );
+            Serial.println("[POWER] Przywracam OFF.");
 
             led.restoreMode(LedMode::OFF);
 
@@ -523,9 +492,7 @@ void checkPowerLoss()
                 "[POWER] Nieznany tryb LED."
             );
 
-            Serial.println(
-                "[POWER] LED -> OFF"
-            );
+            Serial.println("[POWER] LED -> OFF");
 
             led.restoreMode(LedMode::OFF);
 
@@ -551,15 +518,7 @@ void setup()
 
     delay(1000);
 
-    // --------------------------------------------------------
-    // LED INIT
-    // --------------------------------------------------------
-
     led.begin();
-
-    // --------------------------------------------------------
-    // I2C INIT
-    // --------------------------------------------------------
 
     Wire.begin(
         I2C_SDA,
@@ -567,34 +526,13 @@ void setup()
     );
 
     Serial.println();
-
-    Serial.println(
-        "========================================"
-    );
-
-    Serial.println(
-        "       LED CONTROLLER - START"
-    );
-
-    Serial.println(
-        "========================================"
-    );
-
-    // --------------------------------------------------------
-    // RTC INIT
-    // --------------------------------------------------------
+    Serial.println("========================================");
+    Serial.println("       LED CONTROLLER - START");
+    Serial.println("========================================");
 
     bool rtcReady = rtc.begin();
 
-    // --------------------------------------------------------
-    // EEPROM INIT
-    // --------------------------------------------------------
-
     bool storageReady = storage.begin();
-
-    // --------------------------------------------------------
-    // POWER LOSS CHECK
-    // --------------------------------------------------------
 
     if (rtcReady && storageReady)
     {
@@ -606,16 +544,10 @@ void setup()
             "[START] RTC lub EEPROM niedostepne."
         );
 
-        Serial.println(
-            "[START] LED -> OFF"
-        );
+        Serial.println("[START] LED -> OFF");
 
         led.restoreMode(LedMode::OFF);
     }
-
-    // --------------------------------------------------------
-    // RESTORED MODE
-    // --------------------------------------------------------
 
     Serial.printf(
         "[START] Aktualny tryb LED: 0x%02X\n",
@@ -623,16 +555,20 @@ void setup()
     );
 
     // --------------------------------------------------------
-    // HEARTBEAT INIT
+    // REMOTE INIT
     // --------------------------------------------------------
+
+    if (!remote.begin())
+    {
+        Serial.println(
+            "[REMOTE] UWAGA: odbiornik pilota niedostepny."
+        );
+    }
 
     lastSaveMillis = millis();
 
     Serial.println();
-
-    Serial.println(
-        "Normalna praca uruchomiona."
-    );
+    Serial.println("Normalna praca uruchomiona.");
 
     Serial.printf(
         "Heartbeat STORAGE: co %lu sekund.\n",
@@ -645,22 +581,17 @@ void setup()
     );
 
     Serial.println();
+    Serial.println("STEROWANIE SERIAL:");
+    Serial.println("1 = STATIC WHITE");
+    Serial.println("2 = FLOW");
+    Serial.println("0 = OFF");
 
-    Serial.println(
-        "STEROWANIE SERIAL:"
-    );
-
-    Serial.println(
-        "1 = STATIC WHITE"
-    );
-
-    Serial.println(
-        "2 = FLOW"
-    );
-
-    Serial.println(
-        "0 = OFF"
-    );
+    Serial.println();
+    Serial.println("STEROWANIE PILOTEM:");
+    Serial.println("W = STATIC WHITE");
+    Serial.println("ON = LAST ACTIVE MODE");
+    Serial.println("OFF = LED OFF");
+    Serial.println("GROUP 1 TOP = FLOW");
 }
 
 // ============================================================
@@ -669,21 +600,11 @@ void setup()
 
 void loop()
 {
-    // --------------------------------------------------------
-    // SERIAL COMMANDS
-    // --------------------------------------------------------
-
     handleSerialCommands();
 
-    // --------------------------------------------------------
-    // LED ANIMATION
-    // --------------------------------------------------------
+    handleRemoteCommands();
 
     led.update();
-
-    // --------------------------------------------------------
-    // HEARTBEAT
-    // --------------------------------------------------------
 
     if (
         millis() - lastSaveMillis >=

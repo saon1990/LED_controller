@@ -3,18 +3,11 @@
 
 #include <Wire.h>
 
-// ============================================================
-// BEGIN
-// ============================================================
-
 bool EepromManager::begin()
 {
     uint8_t marker;
 
-    if (readBytes(
-            EEPROM_LED_VALID_ADDR,
-            &marker,
-            1))
+    if (readBytes(EEPROM_LED_VALID_ADDR, &marker, 1))
     {
         Serial.println("[STORAGE] AT24C32 OK.");
         return true;
@@ -24,10 +17,6 @@ bool EepromManager::begin()
 
     return false;
 }
-
-// ============================================================
-// WRITE BYTES
-// ============================================================
 
 bool EepromManager::writeBytes(
     uint16_t address,
@@ -40,25 +29,15 @@ bool EepromManager::writeBytes(
     Wire.write(address & 0xFF);
 
     for (uint8_t i = 0; i < length; i++)
-    {
         Wire.write(data[i]);
-    }
 
     if (Wire.endTransmission() != 0)
-    {
         return false;
-    }
-
-    // Czas zapisu AT24C32
 
     delay(10);
 
     return true;
 }
-
-// ============================================================
-// READ BYTES
-// ============================================================
 
 bool EepromManager::readBytes(
     uint16_t address,
@@ -71,28 +50,20 @@ bool EepromManager::readBytes(
     Wire.write(address & 0xFF);
 
     if (Wire.endTransmission(false) != 0)
-    {
         return false;
-    }
 
     if (Wire.requestFrom(
-            (uint8_t)EEPROM_ADDR,
+            static_cast<uint8_t>(EEPROM_ADDR),
             length) != length)
     {
         return false;
     }
 
     for (uint8_t i = 0; i < length; i++)
-    {
         data[i] = Wire.read();
-    }
 
     return true;
 }
-
-// ============================================================
-// SAVE TIMESTAMP
-// ============================================================
 
 bool EepromManager::saveTimestamp(uint32_t timestamp)
 {
@@ -110,90 +81,42 @@ bool EepromManager::saveTimestamp(uint32_t timestamp)
     );
 }
 
-// ============================================================
-// LOAD TIMESTAMP
-// ============================================================
-
 bool EepromManager::loadTimestamp(uint32_t& timestamp)
 {
     uint8_t buffer[4];
 
-    if (!readBytes(
-            EEPROM_TIMESTAMP_ADDR,
-            buffer,
-            4))
-    {
+    if (!readBytes(EEPROM_TIMESTAMP_ADDR, buffer, 4))
         return false;
-    }
 
     timestamp =
         ((uint32_t)buffer[0] << 24) |
         ((uint32_t)buffer[1] << 16) |
-        ((uint32_t)buffer[2] << 8)  |
+        ((uint32_t)buffer[2] << 8) |
         ((uint32_t)buffer[3]);
 
     return true;
 }
 
-// ============================================================
-// SAVE LED MODE
-// ============================================================
-
 bool EepromManager::saveLedMode(uint8_t mode)
 {
-    // Akceptujemy tylko:
-    // 0x00 = OFF
-    // 0x01 = STATIC_WHITE
-    // 0x02 = FLOW
-
     if (mode > 0x02)
     {
-        Serial.println(
-            "[STORAGE] BLAD: nieprawidlowy tryb LED."
-        );
-
+        Serial.println("[STORAGE] BLAD: nieprawidlowy tryb LED.");
         return false;
     }
-
-    // --------------------------------------------------------
-    // Unieważnienie poprzedniego zapisu
-    // --------------------------------------------------------
 
     uint8_t invalidMarker = 0x00;
 
-    if (!writeBytes(
-            EEPROM_LED_VALID_ADDR,
-            &invalidMarker,
-            1))
-    {
+    if (!writeBytes(EEPROM_LED_VALID_ADDR, &invalidMarker, 1))
         return false;
-    }
 
-    // --------------------------------------------------------
-    // Zapis trybu
-    // --------------------------------------------------------
-
-    if (!writeBytes(
-            EEPROM_LED_STATE_ADDR,
-            &mode,
-            1))
-    {
+    if (!writeBytes(EEPROM_LED_STATE_ADDR, &mode, 1))
         return false;
-    }
-
-    // --------------------------------------------------------
-    // Potwierdzenie poprawnego zapisu
-    // --------------------------------------------------------
 
     uint8_t validMarker = LED_VALID_MARKER;
 
-    if (!writeBytes(
-            EEPROM_LED_VALID_ADDR,
-            &validMarker,
-            1))
-    {
+    if (!writeBytes(EEPROM_LED_VALID_ADDR, &validMarker, 1))
         return false;
-    }
 
     Serial.printf(
         "[STORAGE] Zapisano tryb LED: 0x%02X\n",
@@ -203,58 +126,26 @@ bool EepromManager::saveLedMode(uint8_t mode)
     return true;
 }
 
-// ============================================================
-// LOAD LED MODE
-// ============================================================
-
 bool EepromManager::loadLedMode(uint8_t& mode)
 {
     uint8_t validMarker;
     uint8_t storedMode;
 
-    // --------------------------------------------------------
-    // Odczyt znacznika poprawnego zapisu
-    // --------------------------------------------------------
-
-    if (!readBytes(
-            EEPROM_LED_VALID_ADDR,
-            &validMarker,
-            1))
-    {
+    if (!readBytes(EEPROM_LED_VALID_ADDR, &validMarker, 1))
         return false;
-    }
 
     if (validMarker != LED_VALID_MARKER)
     {
-        Serial.println(
-            "[STORAGE] Brak poprawnego zapisu trybu LED."
-        );
-
+        Serial.println("[STORAGE] Brak poprawnego zapisu trybu LED.");
         return false;
     }
 
-    // --------------------------------------------------------
-    // Odczyt trybu
-    // --------------------------------------------------------
-
-    if (!readBytes(
-            EEPROM_LED_STATE_ADDR,
-            &storedMode,
-            1))
-    {
+    if (!readBytes(EEPROM_LED_STATE_ADDR, &storedMode, 1))
         return false;
-    }
-
-    // --------------------------------------------------------
-    // Walidacja
-    // --------------------------------------------------------
 
     if (storedMode > 0x02)
     {
-        Serial.println(
-            "[STORAGE] Nieprawidlowy tryb LED w EEPROM."
-        );
-
+        Serial.println("[STORAGE] Nieprawidlowy tryb LED w EEPROM.");
         return false;
     }
 
@@ -262,6 +153,64 @@ bool EepromManager::loadLedMode(uint8_t& mode)
 
     Serial.printf(
         "[STORAGE] Odczytano tryb LED: 0x%02X\n",
+        mode
+    );
+
+    return true;
+}
+
+// ============================================================
+// LAST ACTIVE LED MODE
+// Address 0x0016
+// 0x01 = STATIC WHITE
+// 0x02 = FLOW
+// 0x00 and other values = invalid
+// ============================================================
+
+bool EepromManager::saveLastActiveLedMode(uint8_t mode)
+{
+    if (mode != 0x01 && mode != 0x02)
+        return false;
+
+    if (!writeBytes(
+            EEPROM_LAST_ACTIVE_MODE_ADDR,
+            &mode,
+            1))
+    {
+        Serial.println(
+            "[STORAGE] BLAD ZAPISU OSTATNIEGO TRYBU."
+        );
+
+        return false;
+    }
+
+    Serial.printf(
+        "[STORAGE] Ostatni aktywny tryb: 0x%02X\n",
+        mode
+    );
+
+    return true;
+}
+
+bool EepromManager::loadLastActiveLedMode(uint8_t& mode)
+{
+    uint8_t storedMode = 0xFF;
+
+    if (!readBytes(
+            EEPROM_LAST_ACTIVE_MODE_ADDR,
+            &storedMode,
+            1))
+    {
+        return false;
+    }
+
+    if (storedMode != 0x01 && storedMode != 0x02)
+        return false;
+
+    mode = storedMode;
+
+    Serial.printf(
+        "[STORAGE] Odczytano ostatni aktywny tryb: 0x%02X\n",
         mode
     );
 
