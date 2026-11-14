@@ -139,8 +139,7 @@ void LedController::refreshCurrentOutput() {
     if(animation==LedAnimation::BREATHING) {
         renderBreathing();
     } else if(animation==LedAnimation::NONE) {
-        if(mode==LedMode::STATIC_WHITE) setAllWhite();
-        else setAllCurrentColor();
+        setAllCurrentColor();
     }
     // FLOW_ON/FLOW_OFF zostawiamy animacji.
     // Nowe ustawienia zostaną użyte w następnym renderowaniu.
@@ -194,6 +193,15 @@ void LedController::clear() {
     mode=LedMode::OFF;
     animation=LedAnimation::NONE;
     animationFront=0.0f;
+
+    // Pełne wyłączenie kończy sesję koloru.
+    // Następne uruchomienie zacznie się od bieli.
+    currentR=0;
+    currentG=0;
+    currentB=0;
+    currentW=255;
+    currentHue=0;
+
     resetEffectSpeed();
     strip.clear();
     strip.show();
@@ -203,20 +211,25 @@ void LedController::setStaticWhite() {
     mode=LedMode::STATIC_WHITE;
     animation=LedAnimation::NONE;
     animationFront=0;
+
+    currentR=0;
+    currentG=0;
+    currentB=0;
+    currentW=255;
+    currentHue=0;
+
     resetEffectSpeed();
     setAllWhite();
     Serial.println("[LED] MODE: STATIC WHITE");
 }
 
 void LedController::startFlow() {
-    currentR=0;
-    currentG=0;
-    currentB=0;
-    currentW=255;
+    // Nie nadpisujemy koloru.
+    // FLOW dziedziczy kolor aktualnego trybu/efektu.
 
     if(mode==LedMode::FLOW && animation!=LedAnimation::FLOW_OFF) {
-        if(animation==LedAnimation::NONE) setAllWhite();
-        Serial.println("[LED] FLOW - WHITE RESTORED, POSITION PRESERVED");
+        if(animation==LedAnimation::NONE) setAllCurrentColor();
+        Serial.println("[LED] FLOW - POSITION AND COLOR PRESERVED");
         return;
     }
 
@@ -225,7 +238,7 @@ void LedController::startFlow() {
         mode=LedMode::FLOW;
         animation=LedAnimation::FLOW_ON;
         lastFrameMillis=millis()-FRAME_TIME;
-        Serial.println("[LED] FLOW - REVERSE FROM CURRENT POSITION (WHITE)");
+        Serial.println("[LED] FLOW - REVERSE FROM CURRENT POSITION, COLOR PRESERVED");
         return;
     }
 
@@ -238,8 +251,22 @@ void LedController::startFlow() {
 }
 
 void LedController::startBreathing(uint8_t r,uint8_t g,uint8_t b,uint8_t w) {
+    // Wywołanie z domyślnym białym oznacza:
+    // użyj aktualnego koloru, a nie wymuszaj bieli.
+    // Po pełnym clear() aktualny kolor jest już biały.
+    if(r==0 && g==0 && b==0 && w==255) {
+        r=currentR;
+        g=currentG;
+        b=currentB;
+        w=currentW;
+    }
+
+    // Nie restartujemy już działającego BREATHING,
+    // jeśli kolor nie uległ zmianie.
     if(mode==LedMode::BREATHING && animation==LedAnimation::BREATHING &&
-       breathingR==r && breathingG==g && breathingB==b && breathingW==w) return;
+       breathingR==r && breathingG==g && breathingB==b && breathingW==w) {
+        return;
+    }
 
     resetEffectSpeed();
 
@@ -260,8 +287,8 @@ void LedController::startBreathing(uint8_t r,uint8_t g,uint8_t b,uint8_t w) {
     breathingStartMillis=millis();
     lastFrameMillis=millis()-FRAME_TIME;
 
-    Serial.printf("[LED] MODE: BREATHING - START | SPEED: %u | CYCLE: %lu ms\n",
-                  effectSpeed,(unsigned long)breathingCycleMs);
+    Serial.printf("[LED] MODE: BREATHING - START | RGBW: %u,%u,%u,%u | SPEED: %u | CYCLE: %lu ms\n",
+                  r,g,b,w,effectSpeed,(unsigned long)breathingCycleMs);
 }
 
 void LedController::setColorFromHue(uint8_t hue) {
@@ -297,8 +324,6 @@ void LedController::setColorFromHue(uint8_t hue) {
         breathingG=g;
         breathingB=b;
         breathingW=0;
-    } else if(mode==LedMode::FLOW && animation==LedAnimation::NONE) {
-        setAllCurrentColor();
     }
 
     refreshCurrentOutput();
@@ -307,7 +332,23 @@ void LedController::setColorFromHue(uint8_t hue) {
                   hue,r,g,b,getSaturation());
 }
 
-void LedController::turnOn() { setStaticWhite(); }
+// ON zachowuje ostatnio wybrany kolor.
+// Jeżeli FLOW jest w trakcie wygaszania, odwraca animację.
+void LedController::turnOn() {
+    if(animation==LedAnimation::FLOW_OFF) {
+        startFlow();
+        return;
+    }
+
+    mode=LedMode::STATIC_WHITE;
+    animation=LedAnimation::NONE;
+    animationFront=0;
+
+    resetEffectSpeed();
+    setAllCurrentColor();
+
+    Serial.println("[LED] MODE: STATIC COLOR - ON");
+}
 
 void LedController::turnOff() {
     if(mode==LedMode::FLOW) {

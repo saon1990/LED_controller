@@ -16,7 +16,7 @@ namespace REMOTE {
 namespace {
 constexpr uint8_t NRF_CE=15, NRF_CSN=7, NRF_SCK=4, NRF_MISO=6, NRF_MOSI=5;
 constexpr uint8_t NRF_CHANNEL=10, RX_LENGTH=12;
-constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS=600;
+constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS=150;
 constexpr uint32_t CONTROL_REPEAT_TIMEOUT_MS=600;
 
 RemoteAction lastSpeedAction=RemoteAction::SPEED_MINUS;
