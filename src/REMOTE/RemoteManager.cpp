@@ -16,8 +16,10 @@ namespace REMOTE {
 namespace {
 constexpr uint8_t NRF_CE=15, NRF_CSN=7, NRF_SCK=4, NRF_MISO=6, NRF_MOSI=5;
 constexpr uint8_t NRF_CHANNEL=10, RX_LENGTH=12;
+
 constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS=150;
 constexpr uint32_t CONTROL_REPEAT_TIMEOUT_MS=600;
+constexpr uint32_t SUN_SEQUENCE_GAP_MS=300;
 
 RemoteAction lastSpeedAction=RemoteAction::SPEED_MINUS;
 uint32_t lastSpeedPacketMillis=0;
@@ -26,6 +28,11 @@ bool speedActionSeen=false;
 RemoteAction lastControlAction=RemoteAction::SUN_TOP;
 uint32_t lastControlPacketMillis=0;
 bool controlActionSeen=false;
+
+// SUN button sequence tracking.
+RemoteAction sunSequenceAction=RemoteAction::SUN_TOP;
+uint32_t lastSunPacketMillis=0;
+bool sunSequenceActive=false;
 
 static const RemoteAction ACTIONS[]={
     RemoteAction::ON, RemoteAction::OFF, RemoteAction::SUN_TOP,
@@ -92,6 +99,36 @@ bool shouldHandleControlAction(RemoteAction a) {
     lastControlAction=a;
     lastControlPacketMillis=now;
     controlActionSeen=true;
+    return true;
+}
+
+// Returns true only for the first packet of a new SUN sequence.
+// The direction is determined from the first ARG and then latched
+// until no SUN packet has been received for SUN_SEQUENCE_GAP_MS.
+bool identifySunSequence(uint8_t argument,RemoteAction& action) {
+    const uint32_t now=millis();
+
+    const bool newSequence=
+        !sunSequenceActive ||
+        (now-lastSunPacketMillis)>SUN_SEQUENCE_GAP_MS;
+
+    lastSunPacketMillis=now;
+
+    if(!newSequence) {
+        action=sunSequenceAction;
+        return false;
+    }
+
+    sunSequenceAction=
+        (argument<=0x50) ? RemoteAction::SUN_TOP : RemoteAction::SUN_BOTTOM;
+
+    sunSequenceActive=true;
+    action=sunSequenceAction;
+
+    Serial.printf("[REMOTE] SUN SEQUENCE START: %s | FIRST ARG=0x%02X\n",
+                  action==RemoteAction::SUN_TOP ? "SUN_TOP" : "SUN_BOTTOM",
+                  argument);
+
     return true;
 }
 
@@ -270,13 +307,15 @@ bool RemoteManager::processPacket(const uint8_t* raw) {
     RemoteAction action;
 
     // SUN_TOP / SUN_BOTTOM: CMD 0x05.
-    // Z logów: SUN_TOP rozpoczyna się zwykle od niższych ARG,
-    // SUN_BOTTOM od wyższych ARG.
+    // Direction is classified once per packet sequence, not per packet.
     if((command&0x7F)==0x05) {
-        action=(argument<=0x50) ? RemoteAction::SUN_TOP : RemoteAction::SUN_BOTTOM;
+        const bool newSequence=identifySunSequence(argument,action);
 
-        Serial.printf("[REMOTE] BRIGHTNESS CONTROL: %s\n",
-                      action==RemoteAction::SUN_TOP ? "SUN_TOP" : "SUN_BOTTOM");
+        if(!newSequence) {
+            Serial.printf("[REMOTE] SUN SEQUENCE CONTINUES: %s\n",
+                          action==RemoteAction::SUN_TOP ? "SUN_TOP" : "SUN_BOTTOM");
+            return true;
+        }
 
         if(!shouldHandleControlAction(action)) return true;
 
@@ -285,8 +324,7 @@ bool RemoteManager::processPacket(const uint8_t* raw) {
     }
 
     // O_PLUS / O_MINUS: CMD 0x07.
-    // Z przechwyconych logów O_MINUS ma ARG=0x64,
-    // natomiast O_PLUS wysyła zmieniające się wartości ARG.
+    // O_MINUS has ARG=0x64; O_PLUS sends changing ARG values.
     if((command&0x7F)==0x07) {
         action=(argument==0x64) ? RemoteAction::O_MINUS : RemoteAction::O_PLUS;
 
