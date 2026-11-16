@@ -19,7 +19,7 @@ constexpr uint8_t NRF_CHANNEL=10, RX_LENGTH=12;
 
 constexpr uint32_t SPEED_REPEAT_TIMEOUT_MS=150;
 constexpr uint32_t CONTROL_REPEAT_TIMEOUT_MS=600;
-constexpr uint32_t SUN_SEQUENCE_GAP_MS=300;
+constexpr uint32_t SUN_REPEAT_TIMEOUT_MS=150;
 
 RemoteAction lastSpeedAction=RemoteAction::SPEED_MINUS;
 uint32_t lastSpeedPacketMillis=0;
@@ -29,12 +29,12 @@ RemoteAction lastControlAction=RemoteAction::SUN_TOP;
 uint32_t lastControlPacketMillis=0;
 bool controlActionSeen=false;
 
-// SUN button sequence tracking.
-uint32_t lastSunPacketMillis=0;
+// SUN button repeat filtering.
+uint32_t lastSunActionMillis=0;
 uint8_t previousSunArgument=0;
-bool sunSequenceActive=false;
-bool sunDirectionKnown=false;
-RemoteAction sunSequenceAction=RemoteAction::SUN_TOP;
+RemoteAction lastSunAction=RemoteAction::SUN_TOP;
+bool sunArgumentSeen=false;
+bool sunActionSeen=false;
 
 static const RemoteAction ACTIONS[]={
     RemoteAction::ON, RemoteAction::OFF, RemoteAction::SUN_TOP,
@@ -104,28 +104,24 @@ bool shouldHandleControlAction(RemoteAction a) {
     return true;
 }
 
-// SUN direction is determined by the change between consecutive ARG values.
-// Repeated ARG values are ignored. Brightness changes once per new ARG value.
-bool processSunSequence(uint8_t argument) {
+// SUN direction is determined by changes in ARG.
+// Repeated packets in the same direction are filtered like SPEED actions.
+bool processSunArgument(uint8_t argument,uint8_t command) {
     const uint32_t now=millis();
 
-    const bool newSequence=
-        !sunSequenceActive ||
-        (now-lastSunPacketMillis)>SUN_SEQUENCE_GAP_MS;
-
-    lastSunPacketMillis=now;
-
-    if(newSequence) {
-        sunSequenceActive=true;
-        sunDirectionKnown=false;
+    if(!sunArgumentSeen) {
         previousSunArgument=argument;
+        sunArgumentSeen=true;
 
-        Serial.printf("[REMOTE] SUN SEQUENCE START | FIRST ARG=0x%02X\n",
+        Serial.printf("[REMOTE] SUN FIRST ARG: 0x%02X - BASELINE\n",
                       argument);
         return true;
     }
 
     if(argument==previousSunArgument) {
+        if(sunActionSeen)
+            lastSunActionMillis=now;
+
         Serial.printf("[REMOTE] SUN ARG DUPLICATE: 0x%02X - IGNORED\n",
                       argument);
         return true;
@@ -134,36 +130,36 @@ bool processSunSequence(uint8_t argument) {
     const uint8_t oldArgument=previousSunArgument;
     previousSunArgument=argument;
 
-    if(!sunDirectionKnown) {
-        sunSequenceAction=(argument>oldArgument)
-            ? RemoteAction::SUN_TOP
-            : RemoteAction::SUN_BOTTOM;
+    const RemoteAction action=(argument>oldArgument)
+        ? RemoteAction::SUN_TOP
+        : RemoteAction::SUN_BOTTOM;
 
-        sunDirectionKnown=true;
+    if(command&0x80) {
+        lastSunAction=action;
+        lastSunActionMillis=now;
+        sunActionSeen=true;
 
-        Serial.printf("[REMOTE] SUN DIRECTION DETECTED: %s | 0x%02X -> 0x%02X\n",
-                      sunSequenceAction==RemoteAction::SUN_TOP
-                          ? "SUN_TOP" : "SUN_BOTTOM",
-                      oldArgument,argument);
-
-        // The first ARG change both identifies the direction
-        // and performs the first brightness step.
-        return false;
-    }
-
-    const bool sameDirection=
-        (sunSequenceAction==RemoteAction::SUN_TOP && argument>oldArgument) ||
-        (sunSequenceAction==RemoteAction::SUN_BOTTOM && argument<oldArgument);
-
-    if(!sameDirection) {
-        Serial.printf("[REMOTE] SUN ARG DIRECTION MISMATCH: 0x%02X -> 0x%02X - IGNORED\n",
-                      oldArgument,argument);
+        Serial.println("[REMOTE] SUN ACTION IGNORED - REPEAT FLAG");
         return true;
     }
 
-    Serial.printf("[REMOTE] SUN STEP: %s | 0x%02X -> 0x%02X\n",
-                  sunSequenceAction==RemoteAction::SUN_TOP
-                      ? "BRIGHTNESS UP" : "BRIGHTNESS DOWN",
+    if(sunActionSeen && action==lastSunAction &&
+       now-lastSunActionMillis<SUN_REPEAT_TIMEOUT_MS) {
+        lastSunActionMillis=now;
+
+        Serial.printf("[REMOTE] SUN ACTION IGNORED - DUPLICATE (%s)\n",
+                      action==RemoteAction::SUN_TOP
+                          ? "SUN_TOP" : "SUN_BOTTOM");
+        return true;
+    }
+
+    lastSunAction=action;
+    lastSunActionMillis=now;
+    sunActionSeen=true;
+
+    Serial.printf("[REMOTE] SUN ACTION ACCEPTED: %s | 0x%02X -> 0x%02X\n",
+                  action==RemoteAction::SUN_TOP
+                      ? "SUN_TOP" : "SUN_BOTTOM",
                   oldArgument,argument);
 
     return false;
@@ -344,11 +340,12 @@ bool RemoteManager::processPacket(const uint8_t* raw) {
     RemoteAction action;
 
     // SUN_TOP / SUN_BOTTOM: CMD 0x05.
-    // Direction is detected from the ARG trend, not its absolute value.
+    // Direction is determined by ARG changes; repeated actions are filtered.
     if((command&0x7F)==0x05) {
-        if(processSunSequence(argument)) return true;
+        if(processSunArgument(argument,command)) return true;
 
-        handleAction(sunSequenceAction);
+        action=lastSunAction;
+        handleAction(action);
         return true;
     }
 
