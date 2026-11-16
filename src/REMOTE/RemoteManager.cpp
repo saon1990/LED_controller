@@ -30,9 +30,11 @@ uint32_t lastControlPacketMillis=0;
 bool controlActionSeen=false;
 
 // SUN button sequence tracking.
-RemoteAction sunSequenceAction=RemoteAction::SUN_TOP;
 uint32_t lastSunPacketMillis=0;
+uint8_t previousSunArgument=0;
 bool sunSequenceActive=false;
+bool sunDirectionKnown=false;
+RemoteAction sunSequenceAction=RemoteAction::SUN_TOP;
 
 static const RemoteAction ACTIONS[]={
     RemoteAction::ON, RemoteAction::OFF, RemoteAction::SUN_TOP,
@@ -102,10 +104,9 @@ bool shouldHandleControlAction(RemoteAction a) {
     return true;
 }
 
-// Returns true only for the first packet of a new SUN sequence.
-// The direction is determined from the first ARG and then latched
-// until no SUN packet has been received for SUN_SEQUENCE_GAP_MS.
-bool identifySunSequence(uint8_t argument,RemoteAction& action) {
+// SUN direction is determined by the change between consecutive ARG values.
+// Repeated ARG values are ignored. Brightness changes once per new ARG value.
+bool processSunSequence(uint8_t argument) {
     const uint32_t now=millis();
 
     const bool newSequence=
@@ -114,22 +115,58 @@ bool identifySunSequence(uint8_t argument,RemoteAction& action) {
 
     lastSunPacketMillis=now;
 
-    if(!newSequence) {
-        action=sunSequenceAction;
+    if(newSequence) {
+        sunSequenceActive=true;
+        sunDirectionKnown=false;
+        previousSunArgument=argument;
+
+        Serial.printf("[REMOTE] SUN SEQUENCE START | FIRST ARG=0x%02X\n",
+                      argument);
+        return true;
+    }
+
+    if(argument==previousSunArgument) {
+        Serial.printf("[REMOTE] SUN ARG DUPLICATE: 0x%02X - IGNORED\n",
+                      argument);
+        return true;
+    }
+
+    const uint8_t oldArgument=previousSunArgument;
+    previousSunArgument=argument;
+
+    if(!sunDirectionKnown) {
+        sunSequenceAction=(argument>oldArgument)
+            ? RemoteAction::SUN_TOP
+            : RemoteAction::SUN_BOTTOM;
+
+        sunDirectionKnown=true;
+
+        Serial.printf("[REMOTE] SUN DIRECTION DETECTED: %s | 0x%02X -> 0x%02X\n",
+                      sunSequenceAction==RemoteAction::SUN_TOP
+                          ? "SUN_TOP" : "SUN_BOTTOM",
+                      oldArgument,argument);
+
+        // The first ARG change both identifies the direction
+        // and performs the first brightness step.
         return false;
     }
 
-    sunSequenceAction=
-        (argument<=0x50) ? RemoteAction::SUN_TOP : RemoteAction::SUN_BOTTOM;
+    const bool sameDirection=
+        (sunSequenceAction==RemoteAction::SUN_TOP && argument>oldArgument) ||
+        (sunSequenceAction==RemoteAction::SUN_BOTTOM && argument<oldArgument);
 
-    sunSequenceActive=true;
-    action=sunSequenceAction;
+    if(!sameDirection) {
+        Serial.printf("[REMOTE] SUN ARG DIRECTION MISMATCH: 0x%02X -> 0x%02X - IGNORED\n",
+                      oldArgument,argument);
+        return true;
+    }
 
-    Serial.printf("[REMOTE] SUN SEQUENCE START: %s | FIRST ARG=0x%02X\n",
-                  action==RemoteAction::SUN_TOP ? "SUN_TOP" : "SUN_BOTTOM",
-                  argument);
+    Serial.printf("[REMOTE] SUN STEP: %s | 0x%02X -> 0x%02X\n",
+                  sunSequenceAction==RemoteAction::SUN_TOP
+                      ? "BRIGHTNESS UP" : "BRIGHTNESS DOWN",
+                  oldArgument,argument);
 
-    return true;
+    return false;
 }
 
 uint8_t reverseBits(uint8_t v) {
@@ -307,19 +344,11 @@ bool RemoteManager::processPacket(const uint8_t* raw) {
     RemoteAction action;
 
     // SUN_TOP / SUN_BOTTOM: CMD 0x05.
-    // Direction is classified once per packet sequence, not per packet.
+    // Direction is detected from the ARG trend, not its absolute value.
     if((command&0x7F)==0x05) {
-        const bool newSequence=identifySunSequence(argument,action);
+        if(processSunSequence(argument)) return true;
 
-        if(!newSequence) {
-            Serial.printf("[REMOTE] SUN SEQUENCE CONTINUES: %s\n",
-                          action==RemoteAction::SUN_TOP ? "SUN_TOP" : "SUN_BOTTOM");
-            return true;
-        }
-
-        if(!shouldHandleControlAction(action)) return true;
-
-        handleAction(action);
+        handleAction(sunSequenceAction);
         return true;
     }
 
